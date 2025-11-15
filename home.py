@@ -6,6 +6,8 @@ from datetime import datetime
 
 # --- Configuração Inicial ---
 st.set_page_config(page_title="Início", layout="wide")
+st.title("Bem-vindo ao Gerador de Laudos")
+st.write("Selecione 'Gerar Laudo' no menu lateral.")
 
 DATA_FOLDER = "data"
 ARCHIVED_FOLDER = os.path.join(DATA_FOLDER, "arquivados")

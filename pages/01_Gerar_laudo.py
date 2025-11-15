@@ -1,5 +1,6 @@
 import streamlit as st
-from word_handler import gerar_laudo
+import sys
+from utils.word_handler import gerar_laudo
 import os
 from datetime import date, datetime 
 from num2words import num2words
