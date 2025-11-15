@@ -198,28 +198,3 @@ def inserir_lista_no_paragrafo(doc, marcador, lista):
             
             break
 
-# 5. FUNÇÃO PARA CARREGAR ÍNDICE DE PROCESSOS DO GOOGLE SHEETS
-def carregar_indice_processos():
-    import streamlit as st
-    import gspread
-    from google.oauth2.service_account import Credentials
-
-    SCOPES = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-
-    try:
-        credentials = Credentials.from_service_account_info(
-            dict(st.secrets["gcp_service_account"]),
-            scopes=SCOPES
-        )
-        client = gspread.authorize(credentials)
-        spreadsheet = client.open_by_url(st.secrets["spreadsheet_url"])
-        worksheet = spreadsheet.sheet1  # ou .worksheet("Índice") se for o nome da aba
-        dados = worksheet.get_all_records()
-        return dados
-
-    except Exception as e:
-        st.error(f"Não foi possível carregar o índice de processos (Sheets): {e}")
-        return None

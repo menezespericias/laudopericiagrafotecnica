@@ -20,8 +20,6 @@ st.title("Bem-vindo ao Gerador de Laudos")
 st.write("Selecione 'Gerar Laudo' no menu lateral.")
 
 # --- Índice de Processos via SQLite ---
-with st.expander("📄 Índice de Processos (SQLite)", expanded=False):
-    processos = listar_processos()
     if processos:
         df = pd.DataFrame(processos, columns=["ID", "Autor", "Réu", "Status", "Atualizado em"])
         st.dataframe(df, use_container_width=True)
