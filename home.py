@@ -4,7 +4,13 @@ import json
 import shutil
 import pandas as pd
 from datetime import datetime
-from db_handler import init_db, listar_processos, inserir_processo, processo_existe
+from db_handler import (
+    init_db,
+    listar_processos,
+    inserir_processo,
+    processo_existe,
+    excluir_processo  # ✅ Função de exclusão integrada
+)
 
 # --- Configuração Inicial ---
 st.set_page_config(page_title="Início", layout="wide")
@@ -41,6 +47,20 @@ with st.expander("➕ Adicionar Novo Processo"):
                 inserir_processo(novo_id, novo_autor, novo_reu, novo_status, atualizado_em)
                 st.success(f"✅ Processo {novo_id} adicionado com sucesso!")
                 st.rerun()
+
+# --- Exclusão de processos do banco ---
+with st.expander("🗑️ Excluir Processo do Banco de Dados"):
+    processos = listar_processos()
+    if processos:
+        df = pd.DataFrame(processos, columns=["ID", "Autor", "Réu", "Status", "Atualizado em"])
+        processo_ids = df["ID"].tolist()
+        processo_selecionado = st.selectbox("Selecione o processo para excluir", processo_ids)
+        if st.button("Excluir Processo"):
+            excluir_processo(processo_selecionado)
+            st.success(f"✅ Processo {processo_selecionado} excluído com sucesso!")
+            st.rerun()
+    else:
+        st.info("Nenhum processo disponível para exclusão.")
 
 # --- Pastas locais ---
 DATA_FOLDER = "data"

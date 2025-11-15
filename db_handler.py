@@ -44,3 +44,10 @@ def processo_existe(id):
     count = cursor.fetchone()[0]
     conn.close()
     return count > 0
+
+def excluir_processo(id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM processos WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
