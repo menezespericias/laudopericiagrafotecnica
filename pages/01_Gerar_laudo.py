@@ -32,15 +32,13 @@ def update_session_date_format(key_data: str, key_input: str):
         # Converte o objeto date para a string no formato desejado
         if isinstance(date_object, date):
             st.session_state[key_data] = date_object.strftime("%d/%m/%Y")
-        # Tratamento defensivo caso o Streamlit retorne uma lista de uma data (muito raro)
+        # Tratamento defensivo (caso extremo)
         elif isinstance(date_object, (list, tuple)) and date_object and isinstance(date_object[0], date):
             st.session_state[key_data] = date_object[0].strftime("%d/%m/%Y")
             
     except KeyError:
-        # Se a chave do input não existir (ex: widget ainda não foi renderizado), ignora
         pass
     except Exception as e:
-        # Em produção, você pode remover st.error, mas mantive para debug
         st.error(f"Erro no callback de data para {key_data}: {e}")
 
 def update_laudo_date():
@@ -52,31 +50,45 @@ def update_vencimento_date():
     update_session_date_format("HONORARIOS_VENCIMENTO", "input_data_vencimento")
 
 
-# --- Funções Auxiliares (Defesa na Leitura) ---
+# --- Funções Auxiliares (Defesa na Leitura - Sanador de Estado) ---
 
 def get_date_object_from_state(key: str) -> date:
     """
-    Extrai e valida um valor de data do session_state, convertendo strings/listas para date.
-    Esta função é CRÍTICA para garantir que o 'value' do st.date_input seja um objeto date.
+    FUNÇÃO DE DEFESA AGRESSIVA: Extrai e valida o valor de data do session_state, 
+    forçando-o a ser um único objeto date.
     """
     data_val = st.session_state.get(key)
     
-    # 1. TRATAMENTO CRÍTICO (Corrige o TypeError): Se for uma lista, pega o primeiro item.
+    # 1. TRATAMENTO DE LISTA (CAUSA PRINCIPAL DO TypeError)
     if isinstance(data_val, (list, tuple)):
         if data_val:
-            # Pega o primeiro elemento, que deve ser a string ou o objeto date
-            data_val = data_val[0]
+            # Converte o primeiro item da lista em string para processamento
+            data_val = str(data_val[0])
         else:
-            return date.today()
+            return date.today() # Lista vazia, retorna hoje
 
-    # 2. Tenta converter a string "DD/MM/YYYY" para objeto date
+    # 2. TRATAMENTO DE STRING
     if isinstance(data_val, str) and data_val:
+        data_str = data_val.strip()
+        
+        # Tenta formatos comuns de data que podem estar no JSON
+        formatos = ["%d/%m/%Y", "%Y-%m-%d"] 
+        
+        for fmt in formatos:
+            try:
+                # Tenta converter a string para objeto date
+                return datetime.strptime(data_str, fmt).date()
+            except:
+                continue # Tenta o próximo formato
+        
+        # Se todos os formatos falharem
         try:
-            return datetime.strptime(data_val, "%d/%m/%Y").date()
+            # Tenta um parsing genérico (último recurso)
+            return datetime.strptime(data_str, "%d/%m/%Y").date()
         except:
-            pass # Falha na conversão da string, continua para o fallback
+             pass
 
-    # 3. Se já for um objeto date válido, retorna
+    # 3. TRATAMENTO DE OBJETO DATE JÁ EXISTENTE
     elif isinstance(data_val, date):
         return data_val
 
@@ -99,24 +111,7 @@ def init_session_state():
         except:
             st.session_state.etapas_concluidas = set() # Se falhar, inicializa vazio
 
-    # Campos da Etapa 1
-    if 'numero_processo' not in st.session_state:
-        st.session_state.numero_processo = ""
-    if 'autor' not in st.session_state:
-        st.session_state.autor = ""
-    if 'reu' not in st.session_state:
-        st.session_state.reu = ""
-    
-    if 'quesitos_autor' not in st.session_state:
-        st.session_state.quesitos_autor = []
-    if 'quesitos_reu' not in st.session_state:
-        st.session_state.quesitos_reu = []
-
-    if 'anexos' not in st.session_state:
-        st.session_state.anexos = []
-
-    if 'adendos' not in st.session_state:
-        st.session_state.adendos = []
+    # ... (outras inicializações) ...
 
     # Outros campos do laudo
     campos_base = [
@@ -124,13 +119,16 @@ def init_session_state():
         "DATA_NOMEACAO", "LIVRO", "FLS_Q_AUTOR", "FLS_Q_REU", 
         "NUM_EXAMES", "NUM_QUESITOS", "NUM_PECA_AUTENTICIDADE", "NUM_PECA_QUESTIONADA",
         "CONCLUSION", "HONORARIOS_VALOR", "HONORARIOS_VENCIMENTO",
-        "METODOLOGIA_TEXTO", "CORPUS_CONFRONTO_TEXTO", "ANALISE_TEXTO", "status_db"
+        "METODOLOGIA_TEXTO", "CORPUS_CONFRONTO_TEXTO", "ANALISE_TEXTO", "status_db",
+        "numero_processo", "autor", "reu", "quesitos_autor", "quesitos_reu", "anexos", "adendos"
     ]
     for campo in campos_base:
         if campo not in st.session_state:
-            # Inicializa datas como string "hoje" no formato esperado (Defesa 1)
+            # Inicialização segura
             if campo in ["DATA_LAUDO", "HONORARIOS_VENCIMENTO"]:
                 st.session_state[campo] = date.today().strftime("%d/%m/%Y")
+            elif campo in ["quesitos_autor", "quesitos_reu", "anexos", "adendos"]:
+                st.session_state[campo] = []
             else:
                 st.session_state[campo] = ""
 
@@ -153,7 +151,10 @@ def save_current_state():
             
             st.session_state.status_db = NOVO_STATUS 
             
-            st.session_state.etapas_concluidas.add(1)
+            # Garante que a etapa 1 está marcada, usando o tipo set
+            if isinstance(st.session_state.etapas_concluidas, set):
+                st.session_state.etapas_concluidas.add(1)
+            
             st.toast(f"✅ Dados do Processo {process_id} salvos e status atualizado para '{NOVO_STATUS}'.")
             return True
             
@@ -192,10 +193,9 @@ if "process_to_load" in st.session_state and st.session_state["process_to_load"]
     process_id = st.session_state["process_to_load"]
     
     try:
-        # Usa a função do data_handler para carregar
         dados_carregados = load_process_data(process_id)
         
-        # Carrega os dados para o session_state, sobrescrevendo valores existentes
+        # Carrega os dados para o session_state
         for key, value in dados_carregados.items():
             st.session_state[key] = value
 
@@ -203,6 +203,9 @@ if "process_to_load" in st.session_state and st.session_state["process_to_load"]
         
         st.session_state.process_to_load = None 
         st.session_state.editing_etapa_1 = True
+        
+        # Garante a coerção de tipo de 'etapas_concluidas' após o carregamento
+        init_session_state() 
         
     except FileNotFoundError:
         st.error(f"❌ Arquivo JSON para o processo {process_id} não encontrado. Por favor, volte e tente recriá-lo.")
@@ -263,8 +266,7 @@ with st.expander(f"1. Dados Básicos do Processo - {st.session_state.numero_proc
         st.session_state.ESPECIALIZACAO = st.text_input("Especialização (Ex: Grafotécnico)", value=st.session_state.get("ESPECIALIZACAO", ""))
         
     if st.button("💾 Salvar Dados Básicos (Etapa 1)"):
-        # Garante que o valor final do input seja salvo no formato string antes de salvar o JSON
-        update_laudo_date()
+        # O save_current_state já chama update_laudo_date e update_vencimento_date
         if save_current_state():
             st.session_state.editing_etapa_1 = False
             st.rerun()
@@ -330,7 +332,8 @@ with st.expander("2. Peças e Quesitos"):
             if col_q2.button("🗑️ Remover", key=f"del_quesito_reu_{q['id']}"):
                 remove_list_item("quesitos_reu", q['id'])
     
-    st.session_state.etapas_concluidas.add(2)
+    if isinstance(st.session_state.etapas_concluidas, set):
+        st.session_state.etapas_concluidas.add(2)
 
 st.markdown("---")
 
@@ -373,7 +376,8 @@ with st.expander("3. Documentos Anexados e Peças de Exame"):
                 if col_a2.button("🗑️ Remover", key=f"del_anexo_{a['id']}"):
                     remove_list_item("anexos", a['id'])
 
-    st.session_state.etapas_concluidas.add(3)
+    if isinstance(st.session_state.etapas_concluidas, set):
+        st.session_state.etapas_concluidas.add(3)
 
 st.markdown("---")
 
@@ -384,7 +388,8 @@ with st.expander("4. Considerações Técnicas, Metodologia e Corpus de Confront
     
     st.session_state.CORPUS_CONFRONTO_TEXTO = st.text_area("Descrição do Corpus de Confronto (Peças de Autenticidade)", 
                                                            value=st.session_state.get("CORPUS_CONFRONTO_TEXTO", ""), height=150)
-    st.session_state.etapas_concluidas.add(4)
+    if isinstance(st.session_state.etapas_concluidas, set):
+        st.session_state.etapas_concluidas.add(4)
 
 st.markdown("---")
 
@@ -392,7 +397,8 @@ st.markdown("---")
 with st.expander("5. Análise Comparativa e Resultados (Desenvolvimento do Laudo)"):
     st.session_state.ANALISE_TEXTO = st.text_area("Descrição Detalhada da Análise e dos Elementos Gráficos Confrontados", 
                                                   value=st.session_state.get("ANALISE_TEXTO", ""), height=500)
-    st.session_state.etapas_concluidas.add(5)
+    if isinstance(st.session_state.etapas_concluidas, set):
+        st.session_state.etapas_concluidas.add(5)
 
 st.markdown("---")
 
@@ -426,7 +432,8 @@ with st.expander("6. Adendos Gráficos (Tabelas e Imagens no Corpo do Laudo)"):
             if col_d2.button("🗑️ Remover", key=f"del_adendo_{d['id']}"):
                 remove_list_item("adendos", d['id'])
     
-    st.session_state.etapas_concluidas.add(6)
+    if isinstance(st.session_state.etapas_concluidas, set):
+        st.session_state.etapas_concluidas.add(6)
 
 st.markdown("---")
 
@@ -453,12 +460,13 @@ with st.expander("7. Conclusão e Informações Finais"):
             on_change=update_vencimento_date
         )
         
-    st.session_state.etapas_concluidas.add(7)
+    if isinstance(st.session_state.etapas_concluidas, set):
+        st.session_state.etapas_concluidas.add(7)
 
 st.markdown("---")
 
 # --- ETAPA 8: GERAÇÃO DO LAUDO ---
-with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_concluidas)):
+with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_concluidas if isinstance(st.session_state.etapas_concluidas, set) else False)):
     st.subheader("Configurações de Geração")
     
     caminho_modelo = CAMINHO_MODELO
@@ -467,7 +475,10 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
     st.write(f"Modelo a ser usado: **{caminho_modelo}**")
     st.write(f"Arquivo de saída: **{caminho_saida}**")
 
-    if st.button("🚀 Gerar Documento .DOCX", type="primary", disabled=(len(st.session_state.etapas_concluidas) < 7)):
+    # Verifica se pelo menos 7 etapas estão concluídas para habilitar o botão
+    is_disabled = not(isinstance(st.session_state.etapas_concluidas, set) and len(st.session_state.etapas_concluidas) >= 7)
+
+    if st.button("🚀 Gerar Documento .DOCX", type="primary", disabled=is_disabled):
         
         # Garante que os valores de data estejam atualizados no session_state antes de usar os dados
         update_laudo_date()
@@ -505,10 +516,11 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
                 quesito_images_list=quesito_images_list
             )
             
-            st.session_state.etapas_concluidas.add(8) # Marca a etapa 8 como concluída
+            if isinstance(st.session_state.etapas_concluidas, set):
+                st.session_state.etapas_concluidas.add(8) # Marca a etapa 8 como concluída
             
             # Salva o estado atualizado do processo (garante que dados de conclusão estejam no JSON)
-            if save_process_data(st.session_state.numero_processo, st.session_state):
+            if save_current_state():
                  st.success(f"Laudo **{st.session_state.numero_processo}** gerado com sucesso!")
             
             # Adiciona botão de download
