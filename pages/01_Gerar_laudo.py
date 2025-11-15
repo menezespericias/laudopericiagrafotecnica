@@ -27,8 +27,13 @@ def init_session_state():
     if 'editing_etapa_1' not in st.session_state:
         st.session_state.editing_etapa_1 = True # Começa com a primeira etapa aberta
 
-    if 'etapas_concluidas' not in st.session_state:
-        st.session_state.etapas_concluidas = set()
+    # CORREÇÃO CRÍTICA: Garante que etapas_concluidas seja sempre um SET para usar .add()
+    if 'etapas_concluidas' not in st.session_state or isinstance(st.session_state.etapas_concluidas, list):
+        # Converte para set, se for lista (caso tenha sido carregado assim do JSON)
+        if isinstance(st.session_state.etapas_concluidas, list):
+            st.session_state.etapas_concluidas = set(st.session_state.etapas_concluidas)
+        else:
+            st.session_state.etapas_concluidas = set()
 
     # Campos da Etapa 1
     if 'numero_processo' not in st.session_state:
