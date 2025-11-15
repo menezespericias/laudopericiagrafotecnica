@@ -1,4 +1,5 @@
 streamlit
 python-docx
 num2words
-Pillow
+gspread # A biblioteca que faremos uso
+# Outras bibliotecas que você usa...
