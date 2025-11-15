@@ -4,427 +4,417 @@ import json
 from datetime import date, datetime
 from num2words import num2words
 from typing import List, Dict, Any, Union
+from word_handler import gerar_laudo # Importa a função de geração do laudo
+from data_handler import save_process_data, load_process_data # NOVO: Importa funções de I/O de JSON
 
 # --- Configuração Inicial ---
 st.set_page_config(page_title="Laudo Grafotécnico", layout="wide")
 DATA_FOLDER = "data"
+os.makedirs(DATA_FOLDER, exist_ok=True) # Garante que a pasta 'data' existe
 
-# --- Carregamento automático do processo selecionado ---
+# --- Variáveis Globais ---
+# Caminho para o arquivo modelo (Obrigatório)
+CAMINHO_MODELO = "LAUDO PERICIAL GRAFOTÉCNICO.docx" 
+# Pasta de saída dos laudos gerados
+OUTPUT_FOLDER = "output"
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+# --- Funções Auxiliares ---
+
+def init_session_state():
+    """Inicializa as chaves do session_state que não existem."""
+    # Garante que as variáveis de estado existam para evitar erros de KeyError
+    if 'editing_etapa_1' not in st.session_state:
+        st.session_state.editing_etapa_1 = True # Começa com a primeira etapa aberta
+
+    if 'etapas_concluidas' not in st.session_state:
+        st.session_state.etapas_concluidas = set()
+
+    # Campos da Etapa 1
+    if 'numero_processo' not in st.session_state:
+        st.session_state.numero_processo = ""
+    if 'autor' not in st.session_state:
+        st.session_state.autor = ""
+    if 'reu' not in st.session_state:
+        st.session_state.reu = ""
+    
+    # Campos das demais etapas (adicionar conforme o laudo)
+    if 'quesitos_autor' not in st.session_state:
+        st.session_state.quesitos_autor = []
+    if 'quesitos_reu' not in st.session_state:
+        st.session_state.quesitos_reu = []
+
+    if 'anexos' not in st.session_state:
+        st.session_state.anexos = []
+
+    if 'adendos' not in st.session_state:
+        st.session_state.adendos = []
+
+    # Outros campos do laudo
+    campos_base = [
+        "JUIZO", "VARA", "COMARCA", "DATA_LAUDO", "PERITO", "ESPECIALIZACAO",
+        "DATA_NOMEACAO", "LIVRO", "FLS_Q_AUTOR", "FLS_Q_REU", 
+        "NUM_EXAMES", "NUM_QUESITOS", "NUM_PECA_AUTENTICIDADE", "NUM_PECA_QUESTIONADA",
+        "CONCLUSION", "HONORARIOS_VALOR", "HONORARIOS_VENCIMENTO",
+        "METODOLOGIA_TEXTO", "CORPUS_CONFRONTO_TEXTO", "ANALISE_TEXTO"
+    ]
+    for campo in campos_base:
+        if campo not in st.session_state:
+            st.session_state[campo] = ""
+
+def save_current_state():
+    """Chama a função de salvar do data_handler e atualiza o estado."""
+    if st.session_state.numero_processo:
+        process_id = st.session_state.numero_processo
+        
+        try:
+            # Usa a função do data_handler para salvar
+            save_process_data(process_id, st.session_state)
+            
+            st.session_state.etapas_concluidas.add(1) # Marca a etapa 1 como concluída
+            st.toast(f"✅ Dados do Processo {process_id} salvos em JSON.")
+            return True
+            
+        except ValueError as e:
+            st.error(f"Erro ao salvar: {e}")
+            return False
+        except Exception as e:
+            st.error(f"Erro inesperado ao salvar: {e}")
+            return False
+    else:
+        st.error("Erro: Número do Processo não definido para salvar.")
+        return False
+
+def add_list_item(key: str, item_data: dict, list_key: str = None):
+    """Adiciona um item a uma lista em st.session_state, garantindo a chave."""
+    final_key = list_key if list_key else key
+    if final_key not in st.session_state:
+        st.session_state[final_key] = []
+    
+    # Adiciona um ID para o item
+    item_data['id'] = len(st.session_state[final_key]) + 1
+    st.session_state[final_key].append(item_data)
+    st.rerun() # Recarrega a tela para mostrar a lista atualizada
+
+def remove_list_item(list_key: str, item_id: int):
+    """Remove um item da lista em st.session_state pelo ID."""
+    if list_key in st.session_state:
+        st.session_state[list_key] = [item for item in st.session_state[list_key] if item.get('id') != item_id]
+        # Re-indexa os IDs após a remoção
+        for i, item in enumerate(st.session_state[list_key]):
+            item['id'] = i + 1
+        st.rerun() # Recarrega a tela para mostrar a lista atualizada
+
+
+# --- Carregamento automático do processo selecionado (REVISADO PARA USAR data_handler.py) ---
 if "process_to_load" in st.session_state and st.session_state["process_to_load"]:
     process_id = st.session_state["process_to_load"]
-    json_path = os.path.join(DATA_FOLDER, f"{process_id}.json")
-    if os.path.exists(json_path):
-        with open(json_path, "r", encoding="utf-8") as f:
-            dados_carregados = json.load(f)
+    
+    try:
+        # Usa a função do data_handler para carregar
+        dados_carregados = load_process_data(process_id)
+        
+        # Carrega os dados para o session_state, sobrescrevendo valores existentes
         for key, value in dados_carregados.items():
-            if key not in st.session_state:
-                st.session_state[key] = value
-        st.success(f"📂 Processo {process_id} carregado com sucesso!")
-        st.session_state.process_to_load = None
-        st.session_state.editing_etapa_1 = False
-        st.rerun()
-    else:
-        st.error(f"❌ Arquivo JSON para o processo {process_id} não encontrado.")
-        st.stop()
-else:
-    st.warning("Nenhum processo selecionado.")
-    st.stop()
-
-# --- Inicialização do Estado de Sessão ---
-def init_session_state():
-    defaults = {
-        "etapas_concluidas": set(),
-        "theme": "light",
-        "editing_etapa_1": True,
-        "num_laudas": 10,
-        "num_docs_questionados": 1,
-        "documentos_questionados_list": [],
-        "quesitos_autor": [],
-        "quesitos_reu": [],
-        "anexos": [],
-        "adendos": [],
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
             st.session_state[key] = value
 
+        st.success(f"📂 Processo **{process_id}** carregado com sucesso!")
+        
+        # Limpa a flag de carregamento após o sucesso
+        st.session_state.process_to_load = None 
+        st.session_state.editing_etapa_1 = True # Abre a primeira etapa para começar a edição
+        
+    except FileNotFoundError:
+        st.error(f"❌ Arquivo JSON para o processo {process_id} não encontrado.")
+        st.session_state.process_to_load = None
+        
+    except Exception as e:
+        st.error(f"❌ Erro ao carregar o arquivo JSON do processo {process_id}: {e}")
+        st.session_state.process_to_load = None
+        
+    # Nenhuma chamada a st.rerun() aqui, o script continua com os dados carregados
+
+
+# --- Inicialização do Estado de Sessão ---
 init_session_state()
 
+# --- VERIFICAÇÃO PRINCIPAL DE NAVEGAÇÃO ---
+if "numero_processo" not in st.session_state or not st.session_state.numero_processo:
+    st.warning("Nenhum processo selecionado ou carregado. Por favor, volte à página inicial para selecionar ou criar um processo.")
+    
+    # Adiciona o botão de voltar para facilitar a navegação
+    if st.button("🏠 Voltar para Home"):
+        st.switch_page("home.py")
+        
+    st.stop() # Interrompe o script se não houver processo carregado
+
 # --- TÍTULO PRINCIPAL ---
-st.title("👨‍🔬 Gerador de Laudo Pericial Grafotécnico")
+st.title(f"👨‍🔬 Laudo Pericial: {st.session_state.numero_processo}")
+
+# Botão Voltar
+if st.button("🏠 Voltar para Home"):
+    st.switch_page("home.py")
+
+st.markdown("---")
 
 # --- ETAPA 1: DADOS BÁSICOS DO PROCESSO ---
-with st.expander("1. Dados do Processo e Objeto da Perícia", expanded=st.session_state.editing_etapa_1):
+with st.expander(f"1. Dados Básicos do Processo - {st.session_state.numero_processo}", expanded=st.session_state.editing_etapa_1):
+    
     col1, col2, col3 = st.columns(3)
+    
     with col1:
-        st.session_state.numero_processo = st.text_input(
-            "Número do Processo",
-            value=st.session_state.get("numero_processo", ""),
-            disabled=not st.session_state.editing_etapa_1
-        )
+        st.session_state.numero_processo = st.text_input("Número do Processo", value=st.session_state.numero_processo, key="input_numero_processo", disabled=True)
+        st.session_state.JUIZO = st.text_input("Juízo (Ex: MM. Juiz de Direito da)", value=st.session_state.get("JUIZO", ""))
+        st.session_state.COMARCA = st.text_input("Comarca", value=st.session_state.get("COMARCA", ""))
+    
     with col2:
-        st.session_state.autor = st.text_input(
-            "Autor",
-            value=st.session_state.get("autor", ""),
-            disabled=not st.session_state.editing_etapa_1
-        )
+        st.session_state.autor = st.text_area("Autor(es) (Um por linha)", value=st.session_state.get("autor", ""))
+        st.session_state.reu = st.text_area("Réu(s) (Um por linha)", value=st.session_state.get("reu", ""))
+
     with col3:
-        st.session_state.reu = st.text_input(
-            "Réu",
-            value=st.session_state.get("reu", ""),
-            disabled=not st.session_state.editing_etapa_1
-        )
-
-    st.session_state.status_processo = st.selectbox(
-        "Status do Processo",
-        options=["Em Edição", "Pronto para Conclusão", "Finalizado"],
-        index=["Em Edição", "Pronto para Conclusão", "Finalizado"].index(
-            st.session_state.get("status_processo", "Em Edição")
-        )
-    )
-
-    st.session_state.objeto_pericia = st.text_area(
-        "Objeto da Perícia (resumo)",
-        value=st.session_state.get(
-            "objeto_pericia",
-            "Verificar a autenticidade ou falsidade de assinaturas atribuídas ao(a) [NOME DO AUTOR], aposta no(s) documento(s) [LISTA DE DOCUMENTOS QUESTIONADOS]."
-        ),
-        height=100
-    )
-
-    st.session_state.data_laudo = st.date_input(
-        "Data de Encerramento/Entrega do Laudo",
-        value=st.session_state.get("data_laudo", date.today())
-    )
-
-    if st.button("Concluir Etapa 1 e Salvar", disabled=not st.session_state.get("numero_processo")):
-        if st.session_state.numero_processo and st.session_state.autor and st.session_state.reu:
-            st.session_state.etapas_concluidas.add(1)
-            st.session_state.editing_etapa_1 = False
-            with open(f"{DATA_FOLDER}/{st.session_state.numero_processo}.json", "w", encoding="utf-8") as f:
-                json.dump(dict(st.session_state), f, ensure_ascii=False, indent=2, default=str)
-            st.success("✅ Etapa 1 concluída e dados salvos.")
-            st.rerun()
+        # Pega a data de conclusão do laudo do estado. Ela já é um objeto date (se carregada do JSON) ou string (se inicializada).
+        data_laudo_val = st.session_state.get("DATA_LAUDO")
+        # Se for string (primeira inicialização ou JSON antigo), tenta converter, senão usa hoje
+        if isinstance(data_laudo_val, str):
+            try:
+                data_obj = datetime.strptime(data_laudo_val, "%d/%m/%Y").date()
+            except:
+                data_obj = date.today()
+        elif isinstance(data_laudo_val, date):
+            data_obj = data_laudo_val
         else:
-            st.error("Preencha o Número do Processo, Autor e Réu para continuar.")
+            data_obj = date.today()
+            
+        st.session_state.DATA_LAUDO = st.date_input("Data da Conclusão do Laudo", value=data_obj, key="input_data_laudo")
+        
+        st.session_state.PERITO = st.text_input("Nome do Perito", value=st.session_state.get("PERITO", ""))
+        st.session_state.ESPECIALIZACAO = st.text_input("Especialização (Ex: Grafotécnico)", value=st.session_state.get("ESPECIALIZACAO", ""))
+        
+    if st.button("💾 Salvar Dados Básicos (Etapa 1)"):
+        if save_current_state():
+            st.session_state.editing_etapa_1 = False # Fecha a expansão após salvar
+            st.rerun()
 
-# --- ETAPA 2: LISTA DE AUTORES E RÉUS ---
-enable_next_steps = 1 in st.session_state.etapas_concluidas
+st.markdown("---")
 
-with st.expander("2. Partes do Processo (Lista)", expanded=enable_next_steps and 2 not in st.session_state.etapas_concluidas):
-    st.session_state.autores_list = st.text_area(
-        "Lista de Autores (um por linha)",
-        value=st.session_state.get("autores_list", st.session_state.get("autor", "")),
-        help="Use uma linha por nome. O primeiro será usado como nome principal."
-    )
-    st.session_state.reus_list = st.text_area(
-        "Lista de Réus (um por linha)",
-        value=st.session_state.get("reus_list", st.session_state.get("reu", "")),
-        help="Use uma linha por nome. O primeiro será usado como nome principal."
-    )
+# --- ETAPA 2: PEÇAS E QUESITOS ---
+with st.expander("2. Peças e Quesitos"):
+    
+    # Formulário para adicionar Quesitos do Autor
+    with st.form("form_quesitos_autor"):
+        st.subheader("Quesitos do Autor")
+        novo_quesito_autor = st.text_area("Texto do Quesito")
+        imagem_quesito_autor = st.file_uploader("Imagem do Quesito (Opcional)", type=['png', 'jpg', 'jpeg'], key="upload_quesito_autor")
+        
+        if st.form_submit_button("➕ Adicionar Quesito do Autor"):
+            if novo_quesito_autor:
+                item_data = {
+                    "texto": novo_quesito_autor,
+                    "imagem_obj": imagem_quesito_autor # Salva o objeto uploaded_file
+                }
+                add_list_item("quesitos_autor", item_data)
+            else:
+                st.error("O campo 'Texto do Quesito' é obrigatório.")
+    
+    # Visualização e remoção de Quesitos do Autor
+    if st.session_state.quesitos_autor:
+        st.markdown("**Quesitos do Autor Adicionados:**")
+        for q in st.session_state.quesitos_autor:
+            col_q1, col_q2 = st.columns([4, 1])
+            col_q1.write(f"**Quesito {q['id']}:** {q['texto']}")
+            # Nota: O objeto imagem_obj só está presente durante a sessão (não salvo no JSON)
+            # Para reexibir após o load, precisaria re-carregar a imagem de um local persistente
+            if q.get('imagem_obj'):
+                col_q1.image(q['imagem_obj'], caption=f"Imagem do Quesito {q['id']}", width=200)
+            if col_q2.button("🗑️ Remover", key=f"del_quesito_autor_{q['id']}"):
+                remove_list_item("quesitos_autor", q['id'])
+    
+    st.markdown("---")
+    
+    # Formulário para adicionar Quesitos do Réu
+    with st.form("form_quesitos_reu"):
+        st.subheader("Quesitos do Réu")
+        novo_quesito_reu = st.text_area("Texto do Quesito", key="input_quesito_reu")
+        imagem_quesito_reu = st.file_uploader("Imagem do Quesito (Opcional)", type=['png', 'jpg', 'jpeg'], key="upload_quesito_reu")
 
-    if st.button("Concluir Etapa 2"):
-        st.session_state.etapas_concluidas.add(2)
-        with open(f"{DATA_FOLDER}/{st.session_state.numero_processo}.json", "w", encoding="utf-8") as f:
-            json.dump(dict(st.session_state), f, ensure_ascii=False, indent=2, default=str)
-        st.success("✅ Etapa 2 concluída e dados salvos.")
-        st.rerun()
+        if st.form_submit_button("➕ Adicionar Quesito do Réu"):
+            if novo_quesito_reu:
+                item_data = {
+                    "texto": novo_quesito_reu,
+                    "imagem_obj": imagem_quesito_reu # Salva o objeto uploaded_file
+                }
+                add_list_item("quesitos_reu", item_data)
+            else:
+                st.error("O campo 'Texto do Quesito' é obrigatório.")
 
-# --- ETAPA 3: DOCUMENTOS QUESTIONADOS ---
-with st.expander("3. Documentos Questionados (PQ)", expanded=enable_next_steps and 3 not in st.session_state.etapas_concluidas):
-    st.session_state.num_docs_questionados = st.number_input(
-        "Quantos documentos questionados (PQ)?",
-        min_value=1,
-        value=st.session_state.get("num_docs_questionados", 1)
-    )
+    # Visualização e remoção de Quesitos do Réu
+    if st.session_state.quesitos_reu:
+        st.markdown("**Quesitos do Réu Adicionados:**")
+        for q in st.session_state.quesitos_reu:
+            col_q1, col_q2 = st.columns([4, 1])
+            col_q1.write(f"**Quesito {q['id']}:** {q['texto']}")
+            if q.get('imagem_obj'):
+                col_q1.image(q['imagem_obj'], caption=f"Imagem do Quesito {q['id']}", width=200)
+            if col_q2.button("🗑️ Remover", key=f"del_quesito_reu_{q['id']}"):
+                remove_list_item("quesitos_reu", q['id'])
+    
+    st.session_state.etapas_concluidas.add(2)
 
-    while len(st.session_state.documentos_questionados_list) < st.session_state.num_docs_questionados:
-        st.session_state.documentos_questionados_list.append({
-            "TIPO_DOCUMENTO": "",
-            "FLS_DOCUMENTOS": "",
-            "RESULTADO": "Autêntico"
-        })
-    while len(st.session_state.documentos_questionados_list) > st.session_state.num_docs_questionados:
-        st.session_state.documentos_questionados_list.pop()
+st.markdown("---")
 
-    docs_text_list = []
-    for i in range(st.session_state.num_docs_questionados):
-        st.markdown(f"**Documento Questionado #{i+1}**")
-        colA, colB, colC = st.columns([2, 1, 2])
-        with colA:
-            st.session_state.documentos_questionados_list[i]["TIPO_DOCUMENTO"] = st.text_input(
-                "Tipo/Nome do Documento",
-                value=st.session_state.documentos_questionados_list[i]["TIPO_DOCUMENTO"],
-                key=f"pq_tipo_{i}"
-            )
-        with colB:
-            st.session_state.documentos_questionados_list[i]["FLS_DOCUMENTOS"] = st.text_input(
-                "Fls.",
-                value=st.session_state.documentos_questionados_list[i]["FLS_DOCUMENTOS"],
-                key=f"pq_fls_{i}"
-            )
-        with colC:
-            st.session_state.documentos_questionados_list[i]["RESULTADO"] = st.selectbox(
-                "Conclusão",
-                options=["Autêntico", "Falso", "Não Conclusivo"],
-                index=["Autêntico", "Falso", "Não Conclusivo"].index(
-                    st.session_state.documentos_questionados_list[i]["RESULTADO"]
-                ),
-                key=f"pq_res_{i}"
-            )
-        docs_text_list.append(
-            f"{st.session_state.documentos_questionados_list[i]['TIPO_DOCUMENTO']} - Fls. {st.session_state.documentos_questionados_list[i]['FLS_DOCUMENTOS']}"
-        )
+# --- ETAPA 3: DOCUMENTOS ANEXADOS ---
+with st.expander("3. Documentos Anexados e Peças de Exame"):
+    
+    col_pecas, col_docs = st.columns([1, 2])
+    
+    with col_pecas:
+        st.subheader("Peças de Exame")
+        st.session_state.NUM_PECA_AUTENTICIDADE = st.text_input("Nº de Peças de Autenticidade", value=st.session_state.get("NUM_PECA_AUTENTICIDADE", ""))
+        st.session_state.NUM_PECA_QUESTIONADA = st.text_input("Nº de Peças Questionadas", value=st.session_state.get("NUM_PECA_QUESTIONADA", ""))
+        st.session_state.NUM_EXAMES = st.text_input("Nº de Exames Realizados", value=st.session_state.get("NUM_EXAMES", ""))
 
-    st.session_state.docs_questionados_text = "\n".join(docs_text_list)
+    with col_docs:
+        # Formulário para adicionar Anexos
+        with st.form("form_anexos"):
+            st.subheader("Documentos Anexados")
+            novo_anexo_descricao = st.text_input("Descrição do Documento Anexado")
+            imagem_anexo = st.file_uploader("Imagem do Anexo", type=['png', 'jpg', 'jpeg'], key="upload_anexo")
+            
+            if st.form_submit_button("➕ Adicionar Anexo"):
+                if novo_anexo_descricao and imagem_anexo:
+                    item_data = {
+                        "descricao": novo_anexo_descricao,
+                        "imagem_obj": imagem_anexo
+                    }
+                    add_list_item("anexos", item_data)
+                else:
+                    st.error("A descrição e a imagem são obrigatórias para o Anexo.")
 
-    if st.button("Concluir Etapa 3"):
-        st.session_state.etapas_concluidas.add(3)
-        with open(f"{DATA_FOLDER}/{st.session_state.numero_processo}.json", "w", encoding="utf-8") as f:
-            json.dump(dict(st.session_state), f, ensure_ascii=False, indent=2, default=str)
-        st.success("✅ Etapa 3 concluída e dados salvos.")
-        st.rerun()
+        # Visualização e remoção de Anexos
+        if st.session_state.anexos:
+            st.markdown("**Anexos Adicionados:**")
+            for a in st.session_state.anexos:
+                col_a1, col_a2 = st.columns([4, 1])
+                col_a1.write(f"**Anexo {a['id']}:** {a['descricao']}")
+                if a.get('imagem_obj'):
+                    col_a1.image(a['imagem_obj'], caption=f"Anexo {a['id']}", width=200)
+                if col_a2.button("🗑️ Remover", key=f"del_anexo_{a['id']}"):
+                    remove_list_item("anexos", a['id'])
 
-# --- ETAPA 4: PADRÕES DE CONFRONTO (PC) ---
-with st.expander("4. Padrões de Confronto (PC)", expanded=enable_next_steps and 4 not in st.session_state.etapas_concluidas):
-    st.session_state.num_especimes = st.text_input(
-        "Número de espécimes examinados:",
-        value=st.session_state.get("num_especimes", "5")
-    )
+    st.session_state.etapas_concluidas.add(3)
 
-    st.session_state.fls_pc_a = st.text_input(
-        "Fls. dos Padrões Colhidos no Ato Pericial (PCA)",
-        value=st.session_state.get("fls_pc_a", "N/A - Assinaturas padrão colhidas em cartório.")
-    )
+st.markdown("---")
 
-    st.session_state.fls_pc_e = st.text_input(
-        "Fls. dos Padrões Encontrados nos Autos (PCE)",
-        value=st.session_state.get("fls_pc_e", "Ex: 20-25, 30-35")
-    )
+# --- ETAPA 4: CONSIDERAÇÕES TÉCNICAS E METODOLOGIA ---
+with st.expander("4. Considerações Técnicas, Metodologia e Corpus de Confronto"):
+    # Texto longo sobre a metodologia
+    st.session_state.METODOLOGIA_TEXTO = st.text_area("Texto Detalhado sobre a Metodologia e Técnicas Aplicadas", 
+                                                      value=st.session_state.get("METODOLOGIA_TEXTO", ""), height=300)
+    
+    st.session_state.CORPUS_CONFRONTO_TEXTO = st.text_area("Descrição do Corpus de Confronto (Peças de Autenticidade)", 
+                                                           value=st.session_state.get("CORPUS_CONFRONTO_TEXTO", ""), height=150)
+    st.session_state.etapas_concluidas.add(4)
 
-    st.session_state.analise_paradigmas = st.text_area(
-        "Análise dos Paradigmas",
-        value=st.session_state.get("analise_paradigmas", ""),
-        height=150
-    )
+st.markdown("---")
 
-    if st.button("Concluir Etapa 4"):
-        st.session_state.etapas_concluidas.add(4)
-        with open(f"{DATA_FOLDER}/{st.session_state.numero_processo}.json", "w", encoding="utf-8") as f:
-            json.dump(dict(st.session_state), f, ensure_ascii=False, indent=2, default=str)
-        st.success("✅ Etapa 4 concluída e dados salvos.")
-        st.rerun()
+# --- ETAPA 5: ANÁLISE COMPARATIVA ---
+with st.expander("5. Análise Comparativa e Resultados (Desenvolvimento do Laudo)"):
+    # Aqui entraria a análise detalhada de características gráficas (calibre, ataque, traçado, etc.)
+    st.session_state.ANALISE_TEXTO = st.text_area("Descrição Detalhada da Análise e dos Elementos Gráficos Confrontados", 
+                                                  value=st.session_state.get("ANALISE_TEXTO", ""), height=500)
+    st.session_state.etapas_concluidas.add(5)
 
-# --- ETAPA 5: CONFRONTO E CONCLUSÃO ---
-with st.expander("5. Confronto Grafoscópico e Conclusão", expanded=enable_next_steps and 5 not in st.session_state.etapas_concluidas):
-    st.session_state.confronto_grafoscopico = st.text_area(
-        "Confronto Grafoscópico",
-        value=st.session_state.get("confronto_grafoscopico", ""),
-        height=300
-    )
+st.markdown("---")
 
-    st.session_state.resultado_final = st.selectbox(
-        "Conclusão Principal",
-        options=["AUTÊNTICA", "FALSA", "NÃO CONCLUSIVA"],
-        index=["AUTÊNTICA", "FALSA", "NÃO CONCLUSIVA"].index(st.session_state.get("resultado_final", "AUTÊNTICA"))
-    )
+# --- ETAPA 6: ADENDOS GRÁFICOS (TABELAS E IMAGENS) ---
+with st.expander("6. Adendos Gráficos (Tabelas e Imagens no Corpo do Laudo)"):
+    
+    # Formulário para adicionar Adendos/Ilustrações no corpo do laudo
+    with st.form("form_adendos"):
+        st.subheader("Adendos/Ilustrações")
+        novo_adendo_legenda = st.text_input("Legenda do Adendo (Ex: Figura 1: Comparativo de Assinaturas)")
+        imagem_adendo = st.file_uploader("Imagem do Adendo", type=['png', 'jpg', 'jpeg'], key="upload_adendo")
+        
+        if st.form_submit_button("➕ Adicionar Adendo Gráfico"):
+            if novo_adendo_legenda and imagem_adendo:
+                item_data = {
+                    "legenda": novo_adendo_legenda,
+                    "imagem_obj": imagem_adendo
+                }
+                add_list_item("adendos", item_data)
+            else:
+                st.error("A legenda e a imagem são obrigatórias para o Adendo.")
 
-    st.session_state.conclusao_texto = st.text_area(
-        "Texto da Conclusão",
-        value=st.session_state.get("conclusao_texto", ""),
-        height=150
-    )
+    # Visualização e remoção de Adendos
+    if st.session_state.adendos:
+        st.markdown("**Adendos Adicionados:**")
+        for d in st.session_state.adendos:
+            col_d1, col_d2 = st.columns([4, 1])
+            col_d1.write(f"**Adendo {d['id']}:** {d['legenda']}")
+            if d.get('imagem_obj'):
+                col_d1.image(d['imagem_obj'], caption=f"Adendo {d['id']}", width=200)
+            if col_d2.button("🗑️ Remover", key=f"del_adendo_{d['id']}"):
+                remove_list_item("adendos", d['id'])
+    
+    st.session_state.etapas_concluidas.add(6)
 
-    if st.button("Concluir Etapa 5"):
-        st.session_state.etapas_concluidas.add(5)
-        with open(f"{DATA_FOLDER}/{st.session_state.numero_processo}.json", "w", encoding="utf-8") as f:
-            json.dump(dict(st.session_state), f, ensure_ascii=False, indent=2, default=str)
-        st.success("✅ Etapa 5 concluída e dados salvos.")
-        st.rerun()
+st.markdown("---")
 
-# --- ETAPA 6: QUESITOS (AUTOR E RÉU) ---
-with st.expander("6. Resposta aos Quesitos (Autor e Réu)", expanded=enable_next_steps and 6 not in st.session_state.etapas_concluidas):
-    st.subheader("Quesitos da Parte Autora")
-    st.session_state.fls_quesitos_autor = st.text_input(
-        "Fls. dos Quesitos do Autor",
-        value=st.session_state.get("fls_quesitos_autor", "")
-    )
+# --- ETAPA 7: CONCLUSÃO E HONORÁRIOS ---
+with st.expander("7. Conclusão e Informações Finais"):
+    st.subheader("Conclusão do Laudo")
+    st.session_state.CONCLUSION = st.text_area("Conclusão Final do Laudo Pericial", 
+                                                value=st.session_state.get("CONCLUSION", ""), height=200)
 
-    num_quesitos_autor = st.number_input("Número de Quesitos do Autor:", min_value=0, value=len(st.session_state.quesitos_autor), key="num_q_autor")
+    st.subheader("Informações Financeiras")
+    col_h1, col_h2 = st.columns(2)
+    with col_h1:
+        st.session_state.HONORARIOS_VALOR = st.text_input("Valor dos Honorários (R$)", 
+                                                          value=st.session_state.get("HONORARIOS_VALOR", ""))
+    with col_h2:
+        # Pega a data de vencimento do estado.
+        data_vencimento_val = st.session_state.get("HONORARIOS_VENCIMENTO")
+        # Se for string (primeira inicialização ou JSON antigo), tenta converter, senão usa hoje
+        if isinstance(data_vencimento_val, str):
+            try:
+                data_obj_v = datetime.strptime(data_vencimento_val, "%d/%m/%Y").date()
+            except:
+                data_obj_v = date.today()
+        elif isinstance(data_vencimento_val, date):
+            data_obj_v = data_vencimento_val
+        else:
+            data_obj_v = date.today()
+            
+        st.session_state.HONORARIOS_VENCIMENTO = st.date_input("Data de Vencimento do Pagamento", 
+                                                               value=data_obj_v, key="input_data_vencimento")
 
-    while len(st.session_state.quesitos_autor) < num_quesitos_autor:
-        st.session_state.quesitos_autor.append({"id": len(st.session_state.quesitos_autor) + 1, "quesito": "", "resposta": "", "imagem_obj": None})
-    while len(st.session_state.quesitos_autor) > num_quesitos_autor:
-        st.session_state.quesitos_autor.pop()
+    st.session_state.etapas_concluidas.add(7)
 
-    for i, item in enumerate(st.session_state.quesitos_autor):
-        st.markdown(f"**Quesito Autor #{i+1}**")
-        colQ, colR = st.columns([1, 1])
-        with colQ:
-            st.session_state.quesitos_autor[i]["quesito"] = st.text_area(
-                "Quesito",
-                value=item["quesito"],
-                key=f"qa_quesito_{i}",
-                height=70
-            )
-        with colR:
-            st.session_state.quesitos_autor[i]["resposta"] = st.text_area(
-                "Resposta do Perito",
-                value=item["resposta"],
-                key=f"qa_resposta_{i}",
-                height=70
-            )
-        st.session_state.quesitos_autor[i]["imagem_obj"] = st.file_uploader(
-            "Imagem (opcional)",
-            type=["png", "jpg", "jpeg"],
-            key=f"qa_img_{i}"
-        )
+st.markdown("---")
 
-    st.subheader("Quesitos da Parte Ré")
-    st.session_state.fls_quesitos_reu = st.text_input(
-        "Fls. dos Quesitos do Réu",
-        value=st.session_state.get("fls_quesitos_reu", "")
-    )
+# --- ETAPA 8: GERAÇÃO DO LAUDO ---
+with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_concluidas)):
+    st.subheader("Configurações de Geração")
+    
+    caminho_modelo = CAMINHO_MODELO
+    caminho_saida = os.path.join(OUTPUT_FOLDER, f"Laudo_{st.session_state.numero_processo}.docx")
+    
+    st.write(f"Modelo a ser usado: **{caminho_modelo}**")
+    st.write(f"Arquivo de saída: **{caminho_saida}**")
 
-    num_quesitos_reu = st.number_input("Número de Quesitos do Réu:", min_value=0, value=len(st.session_state.quesitos_reu), key="num_q_reu")
+    if st.button("🚀 Gerar Documento .DOCX", type="primary", disabled=(len(st.session_state.etapas_concluidas) < 7)):
+        
+        # 1. Reúne todos os dados do st.session_state em um dicionário de placeholders
+        dados = {k: v for k, v in st.session_state.items() if not k.startswith("editing_") and k not in ["process_to_load", "etapas_concluidas"]}
 
-    while len(st.session_state.quesitos_reu) < num_quesitos_reu:
-        st.session_state.quesitos_reu.append({"id": len(st.session_state.quesitos_reu) + 1, "quesito": "", "resposta": "", "imagem_obj": None})
-    while len(st.session_state.quesitos_reu) > num_quesitos_reu:
-        st.session_state.quesitos_reu.pop()
-
-    for i, item in enumerate(st.session_state.quesitos_reu):
-        st.markdown(f"**Quesito Réu #{i+1}**")
-        colQ, colR = st.columns([1, 1])
-        with colQ:
-            st.session_state.quesitos_reu[i]["quesito"] = st.text_area(
-                "Quesito",
-                value=item["quesito"],
-                key=f"qr_quesito_{i}",
-                height=70
-            )
-        with colR:
-            st.session_state.quesitos_reu[i]["resposta"] = st.text_area(
-                "Resposta do Perito",
-                value=item["resposta"],
-                key=f"qr_resposta_{i}",
-                height=70
-            )
-        st.session_state.quesitos_reu[i]["imagem_obj"] = st.file_uploader(
-            "Imagem (opcional)",
-            type=["png", "jpg", "jpeg"],
-            key=f"qr_img_{i}"
-        )
-
-    if st.button("Concluir Etapa 6"):
-        st.session_state.etapas_concluidas.add(6)
-        with open(f"{DATA_FOLDER}/{st.session_state.numero_processo}.json", "w", encoding="utf-8") as f:
-            json.dump(dict(st.session_state), f, ensure_ascii=False, indent=2, default=str)
-        st.success("✅ Etapa 6 concluída e dados salvos.")
-        st.rerun()
-
-# --- ETAPA 7: ANEXOS E ADENDOS ---
-with st.expander("7. Anexos e Adendos", expanded=enable_next_steps and 7 not in st.session_state.etapas_concluidas):
-    st.session_state.anexos_list = st.text_area(
-        "Lista de Anexos (texto descritivo)",
-        value=st.session_state.get("anexos_list", ""),
-        help="Descreva os documentos anexos que não são imagens."
-    )
-
-    st.subheader("Upload de Anexos (Imagens ou Arquivos)")
-    uploaded_anexos = st.file_uploader(
-        "Selecione arquivos para anexar",
-        type=["png", "jpg", "jpeg", "pdf", "docx"],
-        accept_multiple_files=True
-    )
-
-    if uploaded_anexos:
-        st.session_state.anexos = []
-        for i, file in enumerate(uploaded_anexos):
-            st.session_state.anexos.append({
-                "NOME": file.name,
-                "ARQUIVO": file,
-                "DESCRICAO": st.text_input(f"Descrição para {file.name}", key=f"desc_anexo_{i}")
-            })
-
-    st.subheader("Upload de Adendos (Somente Imagens)")
-    uploaded_adendos = st.file_uploader(
-        "Selecione imagens para adendos",
-        type=["png", "jpg", "jpeg"],
-        accept_multiple_files=True
-    )
-
-    if uploaded_adendos:
-        st.session_state.adendos = []
-        for i, file in enumerate(uploaded_adendos):
-            st.session_state.adendos.append({
-                "NOME": file.name,
-                "ARQUIVO": file,
-                "DESCRICAO": st.text_input(f"Descrição para {file.name}", key=f"desc_adendo_{i}")
-            })
-
-    if st.button("Concluir Etapa 7"):
-        st.session_state.etapas_concluidas.add(7)
-        with open(f"{DATA_FOLDER}/{st.session_state.numero_processo}.json", "w", encoding="utf-8") as f:
-            json.dump(dict(st.session_state), f, ensure_ascii=False, indent=2, default=str)
-        st.success("✅ Etapa 7 concluída e dados salvos.")
-        st.rerun()
-
-# --- ETAPA 8: GERAÇÃO DO LAUDO FINAL ---
-with st.expander("8. Encerramento e Geração do Laudo", expanded=enable_next_steps and 8 not in st.session_state.etapas_concluidas):
-    st.session_state.num_laudas = st.number_input(
-        "Número final de laudas:",
-        min_value=1,
-        value=st.session_state.get("num_laudas", 10),
-        help="Este valor será usado para os placeholders [NUM_LAUDAS] e [NUM_LAUDAS_EXTENSO]."
-    )
-
-    st.session_state.assinaturas = st.text_area(
-        "Assinaturas/Perito (Placeholder [ASSINATURAS])",
-        value=st.session_state.get("assinaturas", "Carlos Menezes\nPerito Grafotécnico"),
-        height=100
-    )
-
-    st.session_state.caminho_modelo = st.text_input(
-        "Caminho do Arquivo Modelo (.docx):",
-        value=st.session_state.get("caminho_modelo", "LAUDO PERICIAL GRAFOTÉCNICO.docx"),
-        help="Deve ser o nome do arquivo DOCX que está na raiz do seu repositório."
-    )
-
-    if st.button("Gerar Laudo e Baixar Documento", disabled=not st.session_state.get("numero_processo")):
-        from word_handler import gerar_laudo
-
-        # Define caminhos
-        caminho_modelo = st.session_state.caminho_modelo
-        caminho_saida = f"output/Laudo_{st.session_state.numero_processo}.docx"
-        os.makedirs("output", exist_ok=True)
-
-        # Prepara dados para substituição
-        dados = {
-            "NUMERO_DO_PROCESSO": st.session_state.numero_processo,
-            "NOME_DO_AUTOR": st.session_state.autor,
-            "NOME_DO_REU": st.session_state.reu,
-            "OBJETO_DA_PERICIA": st.session_state.objeto_pericia,
-            "DATA_LAUDO": st.session_state.data_laudo.strftime("%d de %B de %Y"),
-            "AUTORES": st.session_state.autores_list,
-            "REUS": st.session_state.reus_list,
-            "DOCUMENTOS_QUESTIONADOS_LIST": st.session_state.docs_questionados_text,
-            "NUM_ESPECIMES": st.session_state.num_especimes,
-            "FLS_PC_A": st.session_state.fls_pc_a,
-            "FLS_PC_E": st.session_state.fls_pc_e,
-            "ANALISE_PARADIGMAS": st.session_state.analise_paradigmas,
-            "CONFRONTO_GRAFOSCOPICO": st.session_state.confronto_grafoscopico,
-            "RESULTADO_FINAL": st.session_state.resultado_final,
-            "CONCLUSAO_TEXTO": st.session_state.conclusao_texto,
-            "FLS_Q_AUTOR": st.session_state.fls_quesitos_autor,
-            "FLS_Q_REU": st.session_state.fls_quesitos_reu,
-            "ANEXOS_LIST": st.session_state.anexos_list,
-            "ASSINATURAS": st.session_state.assinaturas,
-            "NUM_LAUDAS": str(st.session_state.num_laudas),
-        }
-
-        # Prepara imagens dos quesitos
+        # Trata as listas de autores e réus (se houver quebra de linha)
+        dados['AUTORES'] = dados.get('autor', '').split('\n')
+        dados['REUS'] = dados.get('reu', '').split('\n')
+        
+        # Cria a lista de imagens de quesitos a ser passada para word_handler
         quesito_images_list = []
+        
+        # Quesitos Autor
         for q in st.session_state.quesitos_autor:
             if q.get("imagem_obj"):
                 quesito_images_list.append({
@@ -432,6 +422,8 @@ with st.expander("8. Encerramento e Geração do Laudo", expanded=enable_next_st
                     "file_obj": q["imagem_obj"],
                     "description": f"Quesito {q['id']} do Autor"
                 })
+        
+        # Quesitos Réu
         for q in st.session_state.quesitos_reu:
             if q.get("imagem_obj"):
                 quesito_images_list.append({
@@ -441,6 +433,7 @@ with st.expander("8. Encerramento e Geração do Laudo", expanded=enable_next_st
                 })
 
         try:
+            # Chama a função principal de geração do word_handler
             gerar_laudo(
                 caminho_modelo=caminho_modelo,
                 caminho_saida=caminho_saida,
@@ -449,10 +442,30 @@ with st.expander("8. Encerramento e Geração do Laudo", expanded=enable_next_st
                 adendos=st.session_state.adendos,
                 quesito_images_list=quesito_images_list
             )
-            st.session_state.etapas_concluidas.add(8)
-            with open(f"{DATA_FOLDER}/{st.session_state.numero_processo}.json", "w", encoding="utf-8") as f:
-                json.dump(dict(st.session_state), f, ensure_ascii=False, indent=2, default=str)
-            st.success("✅ Laudo gerado com sucesso!")
-            st.markdown(f"📄 [Clique aqui para baixar o laudo gerado]({caminho_saida})")
+            
+            st.session_state.etapas_concluidas.add(8) # Marca a etapa 8 como concluída
+            
+            # Salva o estado atualizado do processo (garante que dados de conclusão estejam no JSON)
+            # Reutiliza a função de salvamento, mas passa apenas o dicionário de dados (se necessário, para manter o JSON atualizado)
+            # Nota: O save_process_data já é chamado no Etapa 1. Para garantir 100% de atualização, chamamos novamente.
+            save_process_data(st.session_state.numero_processo, st.session_state)
+            
+            st.success(f"Laudo **{st.session_state.numero_processo}** gerado com sucesso!")
+            
+            # Adiciona botão de download
+            with open(caminho_saida, "rb") as file:
+                st.download_button(
+                    label="⬇️ Baixar Laudo .DOCX",
+                    data=file,
+                    file_name=os.path.basename(caminho_saida),
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
+
+        except FileNotFoundError:
+            st.error(f"❌ Erro: O arquivo de modelo não foi encontrado em: `{caminho_modelo}`.")
+            st.warning("Certifique-se de que o arquivo 'LAUDO PERICIAL GRAFOTÉCNICO.docx' está na raiz do projeto.")
         except Exception as e:
-            st.error(f"❌ Erro ao gerar o laudo: {e}")
+            st.error(f"❌ Erro durante a geração do documento: {e}")
+            st.exception(e)
+
+st.markdown("---")

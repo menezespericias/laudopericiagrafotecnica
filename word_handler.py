@@ -1,200 +1,198 @@
 from docx import Document
-from docx.shared import Inches
+from docx.shared import Inches, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from num2words import num2words
 import os
 import re
 from typing import List, Dict, Any # Importações para clareza
+from io import BytesIO
 
-# 1. FUNÇÃO PRINCIPAL DE GERAÇÃO
+# --- FUNÇÕES DE UTILIDADE DE WORD DOCX ---
+
+# 2. FUNÇÃO AUXILIAR DE SUBSTITUIÇÃO EM PARÁGRAFOS
+def substituir_em_paragrafo(paragrafo, dados: dict):
+    """
+    Substitui os placeholders em um parágrafo mantendo a formatação original.
+    Adaptado para ignorar placeholders de LISTAS.
+    """
+    
+    # Placeholders que serão tratados como LISTAS (não substituição simples)
+    LIST_PLACEHOLDERS = ["[AUTORES]", "[REUS]"] 
+    
+    texto_original = paragrafo.text
+    texto_novo = texto_original
+    
+    # Verifica se o parágrafo contém placeholders de lista. Se sim, ignora a substituição de texto.
+    if any(lp in texto_original for lp in LIST_PLACEHOLDERS):
+        return
+
+    for chave, valor in dados.items():
+        placeholder = f"[{chave.upper()}]"
+        
+        # Ignora substituição se o valor for uma lista (já é tratado na função principal)
+        if isinstance(valor, list):
+            continue
+            
+        # Converte o valor para string, se necessário
+        valor_str = str(valor)
+        
+        if placeholder in texto_novo:
+            # O processamento de runs é complexo, a melhor abordagem é a substituição via regex em um texto plano temporário
+            # e depois recriar o parágrafo ou usar uma função que preserva a formatação como a abaixo,
+            # mas que requer processamento mais pesado.
+            
+            # Tentativa de substituição com preservação de formatação:
+            if placeholder in paragrafo.text:
+                inline = paragrafo.runs
+                
+                # Mapeia as runs para construir o texto completo
+                paragrafo_text = "".join(run.text for run in inline)
+                
+                # Se a substituição for simples, fazemos no nível do run
+                if paragrafo_text.count(placeholder) == 1 and not (paragrafo_text.startswith(placeholder) and paragrafo_text.endswith(placeholder)):
+                    
+                    # Tenta a substituição direta (mais robusta)
+                    if not inline:
+                        paragrafo.text = paragrafo.text.replace(placeholder, valor_str)
+                    else:
+                        for run in inline:
+                            if placeholder in run.text:
+                                run.text = run.text.replace(placeholder, valor_str)
+                                break
+                    continue # Vai para o próximo dado
+
+    # Se a substituição simples falhar e o placeholder for o único conteúdo do parágrafo:
+    if texto_novo != texto_original:
+        paragrafo.text = texto_novo
+
+# 3. FUNÇÃO AUXILIAR DE SUBSTITUIÇÃO EM TABELAS
+def substituir_em_tabela(tabela, dados: dict):
+    """Substitui os placeholders em todas as células de uma tabela."""
+    for linha in tabela.rows:
+        for celula in linha.cells:
+            for paragrafo in celula.paragraphs:
+                substituir_em_paragrafo(paragrafo, dados)
+
+# 4. FUNÇÃO PARA INSERIR LISTA (Como Parágrafos Formatados)
+def inserir_lista_no_paragrafo(doc, marcador: str, lista: List[str]):
+    """
+    Localiza o placeholder do marcador no documento e o substitui por itens da lista
+    como novos parágrafos formatados com uma lista simples (Bullet Points).
+    """
+    placeholder = f"[{marcador.upper()}]"
+    
+    # 1. Tenta padronizar a lista (espera-se uma lista de strings)
+    if not isinstance(lista, list):
+        if isinstance(lista, str) and "\n" in lista:
+            lista = [item.strip() for item in lista.split("\n") if item.strip()]
+        else:
+            return
+
+    # 2. Itera sobre os parágrafos para encontrar e substituir o placeholder
+    for i, paragrafo in enumerate(doc.paragraphs):
+        if placeholder in paragrafo.text:
+            
+            # Se a lista estiver vazia, apenas remove o placeholder
+            if not lista:
+                paragrafo.text = paragrafo.text.replace(placeholder, "N/A")
+                continue
+
+            # Remove o placeholder do parágrafo original
+            paragrafo.text = paragrafo.text.replace(placeholder, "")
+            
+            # Adiciona os novos itens da lista como parágrafos com estilo de lista
+            # OBS: Usar insert_paragraph_before é complicado, é melhor adicionar ao final
+            # e depois rearranjar, ou usar o run, mas a lista é melhor em novos parágrafos.
+            
+            # Adiciona os itens ANTES do parágrafo que contém o placeholder
+            p_ref = doc.paragraphs[i] # Referência ao parágrafo que contém o placeholder
+            
+            for item in reversed(lista): # Inserindo em ordem reversa para aparecer na ordem correta
+                novo_paragrafo = p_ref.insert_paragraph_before(item)
+                
+                try:
+                    # Tenta aplicar estilo de Lista (Bullet Points)
+                    novo_paragrafo.style = 'List Bullet' 
+                except KeyError:
+                    # Se o estilo não existir no modelo, ignora
+                    pass 
+    
+    # O parágrafo que tinha o placeholder deve ter sido limpo no loop
+
+# 5. FUNÇÃO PARA INSERIR IMAGENS EM SESSÃO ESPECÍFICA
+def inserir_imagens_em_secao(doc, titulo_secao: str, imagens: List[Dict[str, Any]], tipo: str):
+    """
+    Adiciona um título de seção e insere as imagens em seguida no final do documento,
+    usando o objeto UploadedFile diretamente.
+    """
+    if not imagens:
+        return
+
+    doc.add_heading(titulo_secao, level=2)
+    
+    for i, item in enumerate(imagens):
+        # file_obj é o objeto UploadedFile do Streamlit
+        file_obj = item.get("imagem_obj") or item.get("file_obj") 
+        descricao = item.get("description") or item.get("descricao") or f"{tipo} {item.get('id', i+1)}"
+        
+        if file_obj:
+            
+            # Cria um BytesIO (stream de bytes) a partir do UploadedFile
+            image_stream = BytesIO(file_obj.getvalue())
+            
+            # Adiciona a imagem
+            doc.add_paragraph().add_run().add_picture(image_stream, width=Inches(6))
+            
+            # Adiciona a legenda (caption)
+            caption = doc.add_paragraph(descricao)
+            caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            
+            doc.add_paragraph("\n") # Espaço entre imagens
+
+# 1. FUNÇÃO PRINCIPAL DE GERAÇÃO (REVISADA)
 def gerar_laudo(
     caminho_modelo: str, 
     caminho_saida: str, 
     dados: dict, 
     anexos: List[Dict[str, Any]], 
     adendos: List[Dict[str, Any]], 
-    quesito_images_list: List[Dict[str, Any]] # <--- ARGUMENTO FALTANTE CORRIGIDO!
+    quesito_images_list: List[Dict[str, Any]] # Lista de imagens dos quesitos
 ):
     doc = Document(caminho_modelo)
     
     # Adicionar versões por extenso dos números para uso automático
-    if "NUM_ESPECIMES" in dados and isinstance(dados["NUM_ESPECIMES"], str) and dados["NUM_ESPECIMES"].isdigit():
-        num = int(dados["NUM_ESPECIMES"])
+    num_exames = dados.get("NUM_EXAMES")
+    if num_exames and isinstance(num_exames, str) and num_exames.isdigit():
+        num = int(num_exames)
         # Garante que a versão por extenso esteja em maiúsculas
-        dados["NUM_ESPECIMES_EXTENSO"] = num2words(num, lang='pt_BR').upper() 
-
-    # Substituição de campos de texto em parágrafos e tabelas (PRESERVANDO FORMATAÇÃO)
+        dados["NUM_EXAMES_EXTENSO"] = num2words(num, lang='pt_BR').upper() 
+    
+    # 1. Substituição de campos de texto em parágrafos
     for paragrafo in doc.paragraphs:
-        substituir_em_paragrafo(paragrafo, dados)
-
-    for tabela in doc.tables:
-        for linha in tabela.rows:
-            for celula in linha.cells:
-                # Iterar sobre os parágrafos dentro de cada célula
-                for paragrafo in celula.paragraphs:
-                    substituir_em_paragrafo(paragrafo, dados)
-
-    # Inserção de listas (AUTORES, REUS) - Mantida a função original para compatibilidade
-    inserir_lista_no_paragrafo(doc, "AUTORES", dados.get("AUTORES", [])) 
-    inserir_lista_no_paragrafo(doc, "REUS", dados.get("REUS", []))
-
-    
-    # --- INSERÇÃO DE IMAGENS ---
-    # Removida a seção IX. ANÁLISE DAS ASSINATURAS, que parecia ser uma versão antiga.
-
-    # IX. Demonstrações dos Quesitos (FIGURAS)
-    if quesito_images_list:
-        doc.add_page_break()
-        doc.add_heading("IX. DEMONSTRAÇÕES DOS QUESITOS", level=1)
-        for i, img_data in enumerate(quesito_images_list):
-            if img_data.get("file_obj") is not None:
-                try:
-                    # O objeto é Streamlit UploadedFile
-                    img_data["file_obj"].seek(0)
-                    doc.add_picture(img_data["file_obj"], width=Inches(5.5))
-                    # Usando img_data["id"] para referenciar o número do quesito
-                    doc.add_paragraph(f"Figura {img_data['id']}: {img_data['description']}") 
-                    doc.add_paragraph() # Espaçamento
-                except Exception as e:
-                    doc.add_paragraph(f"[ERRO AO INSERIR IMAGEM {img_data['id']} nos Quesitos: {str(e)}]")
-
-
-    # X. ANEXOS (Arquivos) - Lista de descrições, insere apenas imagens (se houver)
-    if anexos or dados.get("ANEXOS_LIST"):
-        doc.add_page_break()
-        doc.add_heading("X. ANEXOS", level=1)
-        # O bloco de texto já deve ter sido substituído nos placeholders.
-        
-        for anexo in anexos:
-             if anexo.get("ARQUIVO") is not None:
-                try:
-                    # Tenta inserir a imagem (se não for PDF/DOCX)
-                    anexo["ARQUIVO"].seek(0)
-                    doc.add_picture(anexo["ARQUIVO"], width=Inches(5.5))
-                    doc.add_paragraph(f"Figura: {anexo.get('DESCRICAO', anexo['ARQUIVO'].name)}")
-                    doc.add_paragraph()
-                except Exception:
-                    # Ignora se for PDF/DOCX ou falhar a inserção de imagem
-                    pass
-
-    # XI. ADENDOS (Imagens/Gráficos)
-    if adendos:
-        doc.add_page_break()
-        doc.add_heading("XI. ADENDOS", level=1)
-        for adendo in adendos:
-            if adendo.get("ARQUIVO") is not None:
-                try:
-                    adendo["ARQUIVO"].seek(0)
-                    doc.add_picture(adendo["ARQUIVO"], width=Inches(5.5))
-                    doc.add_paragraph(f"Figura: {adendo.get('DESCRICAO', adendo['ARQUIVO'].name)}")
-                    doc.add_paragraph()
-                except Exception as e:
-                    doc.add_paragraph(f"[ERRO AO INSERIR ADENDO: {str(e)}]")
-                    
-    # Cria diretório de saída se não existir
-    os.makedirs(os.path.dirname(caminho_saida), exist_ok=True)
-    doc.save(caminho_saida)
-
-# 2. FUNÇÃO CRÍTICA DE SUBSTITUIÇÃO (PRESERVA FORMATAÇÃO)
-def substituir_em_paragrafo(paragrafo, dados):
-    """Substitui placeholders em um parágrafo, preservando a formatação (runs)."""
-    
-    # 1. Agrega o texto de todos os runs do parágrafo
-    texto_completo = "".join(run.text for run in paragrafo.runs)
-    
-    # 2. Executa a substituição em todo o texto
-    texto_substituido = substituir_placeholders(texto_completo, dados)
-    
-    # 3. Se o texto não mudou, retorna
-    if texto_completo == texto_substituido:
-        return
-    
-    # 4. Limpa o parágrafo existente (deleta runs antigos)
-    if not paragrafo.runs:
-        paragrafo.add_run(texto_substituido)
-        return
-
-    primeiro_run = paragrafo.runs[0]
-    primeiro_run.text = texto_substituido
-    
-    # Remove todos os runs a partir do segundo
-    for i in range(len(paragrafo.runs) - 1, 0, -1):
-        p = paragrafo._element
-        p.remove(paragrafo.runs[i]._element)
-
-# 3. FUNÇÃO AUXILIAR DE SUBSTITUIÇÃO DE TEXTO
-def substituir_placeholders(texto, dados):
-    """Substitui placeholders (ex: [CHAVE]) pelo valor em dados."""
-    
-    # Padrões para placeholders: [CHAVE], {CHAVE}, <<CHAVE>>
-    padrao = r"(\[\s*([^\]]+?)\s*\]|\{\s*([^}]+?)\s*\}|<<\s*([^>]+?)\s*>>)"
-    
-    def replace_match(match):
-        # O grupo que não for None contém a CHAVE
-        chave = match.group(2) or match.group(3) or match.group(4)
-        chave_limpa = chave.strip()
-
-        # Tratamento para versão por extenso
-        if chave_limpa.endswith("_EXTENSO"):
-            base_chave = chave_limpa[:-8] # Remove '_EXTENSO'
-            base_valor = dados.get(base_chave)
-            if base_valor is not None and isinstance(base_valor, str) and base_valor.isdigit():
-                try:
-                    num = int(base_valor)
-                    return num2words(num, lang='pt_BR').upper() 
-                except ValueError:
-                    pass
-        
-        # Tratamento padrão
-        if chave_limpa in dados:
-            valor = dados[chave_limpa]
-            if isinstance(valor, str):
-                return valor
-            # Se for uma lista, retorna a união dos itens com quebra de linha
-            elif isinstance(valor, list):
-                 return "\n".join(valor)
-            elif valor is not None:
-                return str(valor)
-        
-        # Se não encontrou valor ou o valor é None, retorna o placeholder original
-        return match.group(0)
-
-    # Realiza a substituição usando a função interna (callback)
-    return re.sub(padrao, replace_match, texto)
-
-
-# 4. FUNÇÃO PARA INSERIR LISTA (Como Parágrafos)
-def inserir_lista_no_paragrafo(doc, marcador, lista):
-    """
-    Localiza o placeholder do marcador no documento e o substitui por itens da lista
-    como novos parágrafos formatados com uma lista simples (Bullet Points).
-    """
-    placeholder = f"[{marcador}]"
-    
-    if not isinstance(lista, list):
-        # Tenta converter a string em lista (se contiver quebras de linha)
-        if isinstance(lista, str) and "\n" in lista:
-            lista = lista.split("\n")
+        # Tenta inserir a lista de Autores/Réus onde o placeholder estiver
+        if "[AUTORES]" in paragrafo.text and 'AUTORES' in dados:
+            inserir_lista_no_paragrafo(doc, "AUTORES", dados['AUTORES'])
+            
+        elif "[REUS]" in paragrafo.text and 'REUS' in dados:
+            inserir_lista_no_paragrafo(doc, "REUS", dados['REUS'])
+            
         else:
-            return
+            # Para os demais placeholders
+            substituir_em_paragrafo(paragrafo, dados)
 
-    for paragrafo in doc.paragraphs:
-        if placeholder in paragrafo.text:
-            
-            # Remove o placeholder do parágrafo original
-            paragrafo.text = paragrafo.text.replace(placeholder, "")
-            
-            if not lista:
-                return
+    # 2. Substituição de campos de texto em tabelas
+    for tabela in doc.tables:
+        substituir_em_tabela(tabela, dados)
+        
+    # 3. Inserção de ADENDOS GRÁFICOS (no corpo do laudo, se necessário, ou em anexo)
+    # Por padrão, vamos inserir no final, conforme a Etapa 6 sugere.
+    inserir_imagens_em_secao(doc, "Adendos Gráficos e Ilustrações", adendos, "Adendo")
+    
+    # 4. Inserção de IMAGENS DOS QUESITOS (no final do laudo)
+    inserir_imagens_em_secao(doc, "Imagens dos Quesitos", quesito_images_list, "Quesito")
+    
+    # 5. Inserção de DOCUMENTOS ANEXADOS (no final do laudo)
+    inserir_imagens_em_secao(doc, "Documentos Anexados (Peças de Exame)", anexos, "Anexo")
 
-            # Adiciona os novos itens da lista como parágrafos com estilo de lista
-            for item in lista:
-                novo_paragrafo = paragrafo.insert_paragraph_before(item)
-                
-                try:
-                    # Tenta aplicar estilo de Bullet Point
-                    novo_paragrafo.style = 'List Bullet' 
-                except KeyError:
-                    pass # Continua sem estilo se não encontrar no modelo
-            
-            break
-
+    # Salva o documento final
+    doc.save(caminho_saida)

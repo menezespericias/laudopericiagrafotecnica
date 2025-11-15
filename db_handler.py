@@ -23,6 +23,7 @@ def listar_processos():
     """Retorna todos os processos cadastrados."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    # Retorna todos os campos para uso no home.py
     cursor.execute("SELECT id, autor, reu, status, atualizado_em FROM processos")
     processos = cursor.fetchall()
     conn.close()
@@ -49,9 +50,28 @@ def processo_existe(id):
     return existe
 
 def excluir_processo(id):
-    """Exclui um processo do banco."""
+    """Exclui um processo do banco de dados."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM processos WHERE id = ?", (id,))
     conn.commit()
     conn.close()
+
+def atualizar_status(id, novo_status):
+    """
+    ATUALIZADO: Altera o status de um processo existente no banco.
+    Usado para Arquivar/Desarquivar.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    atualizado_em = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute("""
+        UPDATE processos
+        SET status = ?, atualizado_em = ?
+        WHERE id = ?
+    """, (novo_status, atualizado_em, id))
+    conn.commit()
+    conn.close()
+
+# IMPORT FALTANTE ADICIONADO
+from datetime import datetime
