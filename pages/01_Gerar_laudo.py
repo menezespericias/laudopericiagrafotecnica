@@ -16,12 +16,13 @@ from db_handler import atualizar_status
 # --- Configuração Inicial ---
 st.set_page_config(page_title="Laudo Grafotécnico", layout="wide")
 
-# CORREÇÃO CRÍTICA DO PATH: Garante o caminho absoluto para o modelo
+# CORREÇÃO CRÍTICA DO PATH: Garante o caminho absoluto para o modelo (Ajustado para subpasta 'template')
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.join(SCRIPT_DIR, '..')
 
 # --- Variáveis Globais ---
-CAMINHO_MODELO = os.path.join(PROJECT_ROOT, "LAUDO PERICIAL GRAFOTÉCNICO.docx") 
+# CORREÇÃO DO CAMINHO: Assumindo que o template está em [raiz_do_projeto]/template/
+CAMINHO_MODELO = os.path.join(PROJECT_ROOT, "template", "LAUDO PERICIAL GRAFOTÉCNICO.docx") 
 OUTPUT_FOLDER = os.path.join(PROJECT_ROOT, "output")
 DATA_FOLDER = os.path.join(PROJECT_ROOT, "data")
 
@@ -91,6 +92,9 @@ def add_list_item(key: str, item_data: dict, list_key: str = None):
     
     item_data['id'] = len(st.session_state[final_key]) + 1
     st.session_state[final_key].append(item_data)
+    # Não usar st.rerun() em add/remove para evitar re-execução desnecessária, 
+    # mas aqui é mantido para garantir a atualização imediata da UI em listas.
+    st.rerun() 
 
 def remove_list_item(list_key: str, item_id: int):
     if list_key in st.session_state:
@@ -99,7 +103,7 @@ def remove_list_item(list_key: str, item_id: int):
             item['id'] = i + 1
         st.rerun()
 
-# --- Funções de Geração de Gráfico/Tabela ---
+# --- Funções de Geração de Gráfico/Tabela EOG ---
 
 def generate_eog_chart_and_table_images(eog_data: dict):
     """
@@ -107,8 +111,15 @@ def generate_eog_chart_and_table_images(eog_data: dict):
     Retorna uma lista de objetos BytesIO para os adendos.
     """
     # 1. Preparar Dados para Plotagem e Tabela
+    # Apenas elementos que NÃO são "Não Analisado"
     results = [v for k, v in eog_data.items() if v != "Não Analisado"]
     
+    adendos_gerados = []
+
+    # Se não houver resultados para plotar, sai.
+    if not results:
+        return adendos_gerados
+
     # Criar DataFrame para a Tabela
     table_data = {
         "Elemento Gráfico": [k for k, v in eog_data.items() if v != "Não Analisado"],
@@ -118,8 +129,6 @@ def generate_eog_chart_and_table_images(eog_data: dict):
     
     # Criar Series para o Gráfico
     count_data = pd.Series(results).value_counts()
-    
-    adendos_gerados = []
 
     # 2. Gerar Imagem da Tabela (Matplotlib)
     if not df_table.empty:
@@ -195,7 +204,6 @@ def save_eog_analysis():
         return
 
     # 2. Remove Adendos EOG antigos (se houver)
-    # Filtra e mantém apenas os adendos não-EOG
     existing_adendos = st.session_state.get("adendos", [])
     
     st.session_state.adendos = [
@@ -266,9 +274,13 @@ def save_current_state():
         process_id = st.session_state.numero_processo
         
         try:
-            update_laudo_date()
-            update_vencimento_date()
-            update_colheita_date()
+            # Garante que as datas sejam strings formatadas antes de salvar
+            if isinstance(st.session_state.get("input_data_laudo"), date):
+                st.session_state.DATA_LAUDO = st.session_state.input_data_laudo.strftime("%d/%m/%Y")
+            if isinstance(st.session_state.get("input_data_vencimento"), date):
+                st.session_state.HONORARIOS_VENCIMENTO = st.session_state.input_data_vencimento.strftime("%d/%m/%Y")
+            if isinstance(st.session_state.get("input_data_colheita"), date):
+                st.session_state.DATA_COLHEITA = st.session_state.input_data_colheita.strftime("%d/%m/%Y")
             
             # Salva os dados no JSON
             save_process_data(process_id, st.session_state) 
@@ -299,21 +311,21 @@ if "process_to_load" in st.session_state and st.session_state["process_to_load"]
     try:
         dados_carregados = load_process_data(process_id)
         
+        # Inicializa e carrega os dados
+        init_session_state() 
         for key, value in dados_carregados.items():
             st.session_state[key] = value
-
+        
         # Garante a sanitização das datas após o carregamento
-        get_date_object_from_state("DATA_LAUDO")
-        get_date_object_from_state("HONORARIOS_VENCIMENTO")
-        get_date_object_from_state("DATA_COLHEITA")
+        # Converte strings de data do JSON para objetos date para o date_input
+        st.session_state["input_data_laudo"] = get_date_object_from_state("DATA_LAUDO")
+        st.session_state["input_data_vencimento"] = get_date_object_from_state("HONORARIOS_VENCIMENTO")
+        st.session_state["input_data_colheita"] = get_date_object_from_state("DATA_COLHEITA")
         
         st.success(f"📂 Processo **{process_id}** carregado com sucesso!")
         
         st.session_state.process_to_load = None 
         st.session_state.editing_etapa_1 = True
-        
-        # Garante a coerção de tipo de 'etapas_concluidas' após o carregamento
-        init_session_state() 
         
     except FileNotFoundError:
         st.error(f"❌ Arquivo JSON para o processo {process_id} não encontrado.")
@@ -354,8 +366,8 @@ with st.expander(f"1. Dados Básicos do Processo - {st.session_state.numero_proc
         st.session_state.ID_NOMEACAO_FLS = st.text_input("Fls. da Nomeação do Perito (para o Bloco 2. Objetivos)", value=st.session_state.get("ID_NOMEACAO_FLS", ""))
 
     with col3:
-        data_obj_laudo = get_date_object_from_state("DATA_LAUDO")
-        st.date_input("Data da Conclusão do Laudo", value=data_obj_laudo, key="input_data_laudo", on_change=update_laudo_date)
+        # Usa o valor do session_state (que foi carregado ou inicializado)
+        st.date_input("Data da Conclusão do Laudo", value=st.session_state.get("input_data_laudo", date.today()), key="input_data_laudo", on_change=update_laudo_date)
         
         st.session_state.PERITO = st.text_input("Nome Completo do Perito", value=st.session_state.get("PERITO", ""))
         st.session_state.ESPECIALIZACAO = st.text_input("Especialização (Ex: Grafotécnico)", value=st.session_state.get("ESPECIALIZACAO", ""))
@@ -452,8 +464,8 @@ with st.expander("3. Documentos Questionados e Padrões (Blocos 4.1 e 4.2)"):
     with col_pca1:
         st.session_state.NUM_ESPECIMES = st.text_input("Nº de Espécimes Autográficos Colhidos", value=st.session_state.get("NUM_ESPECIMES", "0"))
     with col_pca2:
-        data_obj_colheita = get_date_object_from_state("DATA_COLHEITA")
-        st.date_input("Data da Colheita dos Padrões", value=data_obj_colheita, key="input_data_colheita", on_change=update_colheita_date)
+        st.date_input("Data da Colheita dos Padrões", value=st.session_state.get("input_data_colheita", date.today()), key="input_data_colheita", on_change=update_colheita_date)
+        st.session_state.FLS_COLHEITA = st.text_input("Fls. do Auto de Colheita de Material (PCA) (Bloco 4.2.A)", value=st.session_state.get("FLS_COLHEITA", ""))
         
     st.markdown("---")
 
@@ -485,20 +497,22 @@ with st.expander("3. Documentos Questionados e Padrões (Blocos 4.1 e 4.2)"):
 st.markdown("---")
 
 # --- ETAPA 4: EXAMES PERICIAIS E METODOLOGIA (5.1) ---
-with st.expander("4. Análise dos Paradigmas e Metodologia (Bloco 5)"):
+with st.expander("4. Análise dos Paradigmas e Metodologia (Bloco 5.1)"):
     
     st.subheader("5.1. Análise dos Paradigmas (Seleções Rápidas)")
     # Seleções Rápidas para os Elementos de Ordem Geral
     st.session_state.HABILIDADE_VELOCIDADE = st.selectbox(
         "Habilidade e Velocidade (5.1. - 1)",
         ["", "Bom grau de habilidade", "Nível primário/canhestro"],
-        key="input_habilidade_velocidade"
+        key="input_habilidade_velocidade",
+        index=["", "Bom grau de habilidade", "Nível primário/canhestro"].index(st.session_state.get("HABILIDADE_VELOCIDADE", ""))
     )
     
     st.session_state.ESPONTANEIDADE_DINAMISMO = st.selectbox(
         "Espontaneidade e Dinamismo (5.1. - 2)",
         ["", "Traçado livre e espontâneo", "Traçado lento e hesitante"],
-        key="input_espontaneidade_dinamismo"
+        key="input_espontaneidade_dinamismo",
+        index=["", "Traçado livre e espontâneo", "Traçado lento e hesitante"].index(st.session_state.get("ESPONTANEIDADE_DINAMISMO", ""))
     )
     
     col_a, col_b, col_c = st.columns(3)
@@ -506,19 +520,22 @@ with st.expander("4. Análise dos Paradigmas e Metodologia (Bloco 5)"):
         st.session_state.CALIBRE = st.selectbox(
             "Calibre (5.1. - 3)",
             ["", "Médio", "Grosso", "Fino"],
-            key="input_calibre"
+            key="input_calibre",
+            index=["", "Médio", "Grosso", "Fino"].index(st.session_state.get("CALIBRE", ""))
         )
     with col_b:
         st.session_state.ALINHAMENTO_GRAFICO = st.selectbox(
             "Alinhamento Gráfico (5.1. - 4)",
             ["", "Horizontal", "Ascendente", "Descendente"],
-            key="input_alinhamento_grafico"
+            key="input_alinhamento_grafico",
+            index=["", "Horizontal", "Ascendente", "Descendente"].index(st.session_state.get("ALINHAMENTO_GRAFICO", ""))
         )
     with col_c:
         st.session_state.ATAQUES_REMATES = st.selectbox(
             "Ataques e Remates (5.1. - 5)",
             ["", "Apoiados", "Sem apoio", "Mistos"],
-            key="input_ataques_remates"
+            key="input_ataques_remates",
+            index=["", "Apoiados", "Sem apoio", "Mistos"].index(st.session_state.get("ATAQUES_REMATES", ""))
         )
 
     st.markdown("---")
@@ -598,18 +615,23 @@ with st.expander("5. Análise Detalhada (EOG) e Adendos Gráficos (Blocos 5.2 e 
     st.markdown("---")
     
     st.subheader("6. Adendos Gráficos (Tabelas e Imagens no Corpo do Laudo)")
+    # Obs: Remoção da variável 'imagem_adendo' do estado para evitar que Streamlit tente serializar o objeto UploadedFile
+    
     with st.form("form_adendos"):
         novo_adendo_legenda = st.text_input("Legenda do Adendo (Ex: Figura 1: Comparativo de Assinaturas)", key="input_adendo_legenda")
-        imagem_adendo = st.file_uploader("Imagem do Adendo", type=['png', 'jpg', 'jpeg'], key="upload_adendo")
+        # Deve usar um key diferente para o uploader
+        imagem_upload = st.file_uploader("Imagem do Adendo", type=['png', 'jpg', 'jpeg'], key="upload_adendo_file") 
         
         if st.form_submit_button("➕ Adicionar Outro Adendo Gráfico"):
-            if novo_adendo_legenda and imagem_adendo:
+            if novo_adendo_legenda and imagem_upload:
                 
                 # Converte o UploadedFile para BytesIO
-                bytes_data = io.BytesIO(imagem_adendo.getvalue())
+                bytes_data = io.BytesIO(imagem_upload.getvalue())
                 
                 item_data = {"legenda": novo_adendo_legenda, "imagem_obj": bytes_data}
                 add_list_item("adendos", item_data)
+                # Limpar o uploader após o uso
+                st.session_state.upload_adendo_file = None
             else: st.error("A legenda e a imagem são obrigatórias para o Adendo.")
 
     if st.session_state.adendos:
@@ -618,11 +640,12 @@ with st.expander("5. Análise Detalhada (EOG) e Adendos Gráficos (Blocos 5.2 e 
         outros_adendos = [a for a in st.session_state.adendos if a.get("id") not in ["EOG_Table", "EOG_Chart"]]
         for d in outros_adendos:
             col_d1, col_d2 = st.columns([4, 1])
+            # Como o 'imagem_obj' é BytesIO, não é ideal exibi-lo aqui após a reinicialização (seria apenas o objeto de sessão)
             col_d1.write(f"**Adendo {d.get('id', 'N/A')}**: {d['legenda']}")
             if col_d2.button("🗑️ Remover", key=f"del_adendo_{d.get('id', d['legenda'])}"): remove_list_item("adendos", d['id'])
 
     if isinstance(st.session_state.etapas_concluidas, set):
-        st.session_state.etapas_concluidas.add(5) # Atualiza o número da etapa
+        st.session_state.etapas_concluidas.add(5) 
 
 st.markdown("---")
 
@@ -634,7 +657,8 @@ with st.expander("6. Conclusão, Resposta aos Quesitos e Informações Finais (B
     st.session_state.CONCLUSÃO_TIPO = st.selectbox(
         "Selecione o Tipo de Conclusão Principal",
         ["Selecione a Conclusão", "Autêntica", "Inautêntica (Falsificada)", "Inconclusiva"],
-        key="input_conclusao_tipo"
+        key="input_conclusao_tipo",
+        index=["Selecione a Conclusão", "Autêntica", "Inautêntica (Falsificada)", "Inconclusiva"].index(st.session_state.get("CONCLUSÃO_TIPO", "Selecione a Conclusão"))
     )
     
     # Preenchimento automático/personalizável do texto de conclusão (CONCLUSION)
@@ -647,9 +671,10 @@ with st.expander("6. Conclusão, Resposta aos Quesitos e Informações Finais (B
         elif st.session_state.CONCLUSÃO_TIPO == "Inconclusiva":
             default_text = "A conclusão é inconclusiva, pois a qualidade do material ou outros fatores impediram a análise de elementos de valor grafotécnico suficientes para emitir um juízo de valor categórico."
 
-        # Se o texto atual for vazio OU o texto for o padrão de outra opção, define o novo padrão.
-        if not st.session_state.get("CONCLUSION") or st.session_state.get("CONCLUSION") in ["A conclusão é que a assinatura questionada é autêntica, pois foram encontradas convergências significativas de ordem geral e particular com os padrões gráficos do autor, não havendo indícios de imitação ou fraude.", "A conclusão é que a assinatura questionada é inautêntica (falsificada), pois foram encontradas divergências significativas de ordem geral e particular em relação aos padrões gráficos do autor, demonstrando que o lançamento não emanou de seu punho.", "A conclusão é inconclusiva, pois a qualidade do material ou outros fatores impediram a análise de elementos de valor grafotécnico suficientes para emitir um juízo de valor categórico."]:
-            st.session_state.CONCLUSION = default_text
+        # Garante que o texto de conclusão não seja substituído se o usuário já digitou, a menos que mude para um estado 'default'
+        current_conclusion = st.session_state.get("CONCLUSION")
+        if not current_conclusion or current_conclusion in ["A conclusão é que a assinatura questionada é autêntica, pois foram encontradas convergências significativas de ordem geral e particular com os padrões gráficos do autor, não havendo indícios de imitação ou fraude.", "A conclusão é que a assinatura questionada é inautêntica (falsificada), pois foram encontradas divergências significativas de ordem geral e particular em relação aos padrões gráficos do autor, demonstrando que o lançamento não emanou de seu punho.", "A conclusão é inconclusiva, pois a qualidade do material ou outros fatores impediram a análise de elementos de valor grafotécnico suficientes para emitir um juízo de valor categórico."]:
+             st.session_state.CONCLUSION = default_text
             
         st.session_state.CONCLUSION = st.text_area("Texto de Conclusão Detalhada (Aparece após o negrito)", 
                                                     value=st.session_state.get("CONCLUSION", default_text), height=200)
@@ -685,8 +710,7 @@ with st.expander("6. Conclusão, Resposta aos Quesitos e Informações Finais (B
         st.session_state.HONORARIOS_VALOR = st.text_input("Valor dos Honorários (R$)", 
                                                           value=st.session_state.get("HONORARIOS_VALOR", ""))
     with col_h2:
-        data_obj_v = get_date_object_from_state("HONORARIOS_VENCIMENTO")
-        st.date_input("Data de Vencimento do Pagamento", value=data_obj_v, key="input_data_vencimento", on_change=update_vencimento_date)
+        st.date_input("Data de Vencimento do Pagamento", value=st.session_state.get("input_data_vencimento", date.today()), key="input_data_vencimento", on_change=update_vencimento_date)
     with col_h3:
         st.session_state.NUM_LAUDAS = st.text_input("Nº de Laudas no Laudo Final (Preencha após a geração)", value=st.session_state.get("NUM_LAUDAS", "X"))
         
@@ -707,6 +731,7 @@ with st.expander("7. Gerar Laudo Final", expanded=(7 in st.session_state.etapas_
     caminho_saida = os.path.join(OUTPUT_FOLDER, f"Laudo_{st.session_state.numero_processo}.docx")
     
     st.write(f"Modelo a ser usado: **{os.path.basename(CAMINHO_MODELO)}**")
+    st.write(f"Caminho do Modelo (Corrigido): `{CAMINHO_MODELO}`")
     st.write(f"Arquivo de saída: **{os.path.basename(caminho_saida)}** (salvo em `{os.path.basename(OUTPUT_FOLDER)}/`)")
 
     # Verifica se todas as etapas mínimas (1 a 6) foram concluídas
@@ -714,13 +739,13 @@ with st.expander("7. Gerar Laudo Final", expanded=(7 in st.session_state.etapas_
 
     if st.button("🚀 Gerar Documento .DOCX", type="primary", disabled=is_disabled):
         
+        # 1. Atualiza e prepara os dados para o word_handler
         update_laudo_date()
         update_vencimento_date()
         update_colheita_date()
         
-        # 1. Prepara os dados para o word_handler
-        # Copia todos os dados do session_state, exceto metadados de UI
-        dados_simples = {k: v for k, v in st.session_state.items() if not k.startswith("editing_") and k not in ["process_to_load", "etapas_concluidas"]}
+        # Copia todos os dados do session_state
+        dados_simples = {k: v for k, v in st.session_state.items() if not k.startswith("editing_") and k not in ["process_to_load", "etapas_concluidas", "input_data_laudo", "input_data_vencimento", "input_data_colheita"]}
         
         # Processa Autor/Réu para nomes
         dados_simples['AUTORES'] = [a.strip() for a in dados_simples.get('autor', '').split('\n') if a.strip()]
@@ -778,7 +803,7 @@ with st.expander("7. Gerar Laudo Final", expanded=(7 in st.session_state.etapas_
                 )
 
         except FileNotFoundError:
-            st.error(f"❌ Erro de Arquivo: O arquivo de modelo não foi encontrado. Verifique se o arquivo 'LAUDO PERICIAL GRAFOTÉCNICO.docx' está na raiz do projeto (diretório acima da pasta 'pages').")
+            st.error(f"❌ Erro de Arquivo: O arquivo de modelo não foi encontrado. Verifique se o arquivo 'LAUDO PERICIAL GRAFOTÉCNICO.docx' está na pasta 'template' na raiz do projeto.")
         except Exception as e:
             st.error(f"❌ Erro durante a geração do documento: {e}")
             st.exception(e)
