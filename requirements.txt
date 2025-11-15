@@ -1,5 +1,5 @@
 streamlit
+pandas
+matplotlib
 python-docx
 num2words
-gspread
-pandas
