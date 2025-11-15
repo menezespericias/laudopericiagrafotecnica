@@ -5,7 +5,8 @@ from datetime import date, datetime
 from num2words import num2words
 from typing import List, Dict, Any, Union
 from word_handler import gerar_laudo # Importa a função de geração do laudo
-from data_handler import save_process_data, load_process_data # NOVO: Importa funções de I/O de JSON
+from data_handler import save_process_data, load_process_data # Importa funções de I/O de JSON
+from db_handler import atualizar_status # NOVO: Importa função de atualização do DB
 
 # --- Configuração Inicial ---
 st.set_page_config(page_title="Laudo Grafotécnico", layout="wide")
@@ -61,7 +62,7 @@ def init_session_state():
         "DATA_NOMEACAO", "LIVRO", "FLS_Q_AUTOR", "FLS_Q_REU", 
         "NUM_EXAMES", "NUM_QUESITOS", "NUM_PECA_AUTENTICIDADE", "NUM_PECA_QUESTIONADA",
         "CONCLUSION", "HONORARIOS_VALOR", "HONORARIOS_VENCIMENTO",
-        "METODOLOGIA_TEXTO", "CORPUS_CONFRONTO_TEXTO", "ANALISE_TEXTO"
+        "METODOLOGIA_TEXTO", "CORPUS_CONFRONTO_TEXTO", "ANALISE_TEXTO", "status_db"
     ]
     for campo in campos_base:
         if campo not in st.session_state:
@@ -73,11 +74,21 @@ def save_current_state():
         process_id = st.session_state.numero_processo
         
         try:
-            # Usa a função do data_handler para salvar
+            # 1. Salva os dados no JSON
             save_process_data(process_id, st.session_state)
             
+            # 2. ATUALIZAÇÃO CRÍTICA: Atualiza o status e a data no banco de dados SQLite
+            # Se o usuário está editando, o status deve ser "Em andamento"
+            NOVO_STATUS = "Em andamento"
+            
+            # A função atualizar_status já atualiza a coluna 'atualizado_em' automaticamente.
+            atualizar_status(process_id, NOVO_STATUS)
+            
+            # Atualiza o session state para refletir a mudança no DB
+            st.session_state.status_db = NOVO_STATUS 
+            
             st.session_state.etapas_concluidas.add(1) # Marca a etapa 1 como concluída
-            st.toast(f"✅ Dados do Processo {process_id} salvos em JSON.")
+            st.toast(f"✅ Dados do Processo {process_id} salvos e status atualizado para '{NOVO_STATUS}'.")
             return True
             
         except ValueError as e:
@@ -85,6 +96,7 @@ def save_current_state():
             return False
         except Exception as e:
             st.error(f"Erro inesperado ao salvar: {e}")
+            st.warning("Pode haver um problema de sincronização entre o arquivo JSON e o Banco de Dados.")
             return False
     else:
         st.error("Erro: Número do Processo não definido para salvar.")
@@ -111,7 +123,7 @@ def remove_list_item(list_key: str, item_id: int):
         st.rerun() # Recarrega a tela para mostrar a lista atualizada
 
 
-# --- Carregamento automático do processo selecionado (REVISADO PARA USAR data_handler.py) ---
+# --- Carregamento automático do processo selecionado ---
 if "process_to_load" in st.session_state and st.session_state["process_to_load"]:
     process_id = st.session_state["process_to_load"]
     
@@ -130,7 +142,7 @@ if "process_to_load" in st.session_state and st.session_state["process_to_load"]
         st.session_state.editing_etapa_1 = True # Abre a primeira etapa para começar a edição
         
     except FileNotFoundError:
-        st.error(f"❌ Arquivo JSON para o processo {process_id} não encontrado.")
+        st.error(f"❌ Arquivo JSON para o processo {process_id} não encontrado. Por favor, volte e tente recriá-lo.")
         st.session_state.process_to_load = None
         
     except Exception as e:
@@ -421,6 +433,7 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
         
         # Quesitos Autor
         for q in st.session_state.quesitos_autor:
+            # Verifica se o 'imagem_obj' foi carregado (somente em sessão atual)
             if q.get("imagem_obj"):
                 quesito_images_list.append({
                     "id": f"Autor {q['id']}",
@@ -430,6 +443,7 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
         
         # Quesitos Réu
         for q in st.session_state.quesitos_reu:
+            # Verifica se o 'imagem_obj' foi carregado (somente em sessão atual)
             if q.get("imagem_obj"):
                 quesito_images_list.append({
                     "id": f"Réu {q['id']}",
@@ -451,8 +465,6 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
             st.session_state.etapas_concluidas.add(8) # Marca a etapa 8 como concluída
             
             # Salva o estado atualizado do processo (garante que dados de conclusão estejam no JSON)
-            # Reutiliza a função de salvamento, mas passa apenas o dicionário de dados (se necessário, para manter o JSON atualizado)
-            # Nota: O save_process_data já é chamado no Etapa 1. Para garantir 100% de atualização, chamamos novamente.
             save_process_data(st.session_state.numero_processo, st.session_state)
             
             st.success(f"Laudo **{st.session_state.numero_processo}** gerado com sucesso!")
