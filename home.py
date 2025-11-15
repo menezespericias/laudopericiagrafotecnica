@@ -3,11 +3,18 @@ import os
 import json
 import shutil
 from datetime import datetime
+from word_handler import carregar_indice_processos
 
 # --- Configuração Inicial ---
 st.set_page_config(page_title="Início", layout="wide")
 st.title("Bem-vindo ao Gerador de Laudos")
 st.write("Selecione 'Gerar Laudo' no menu lateral.")
+with st.expander("📄 Índice de Processos (Google Sheets)", expanded=False):
+    indice = carregar_indice_processos()
+    if indice:
+        st.dataframe(indice, use_container_width=True)
+    else:
+        st.warning("Não foi possível carregar o índice de processos.")
 
 DATA_FOLDER = "data"
 ARCHIVED_FOLDER = os.path.join(DATA_FOLDER, "arquivados")
