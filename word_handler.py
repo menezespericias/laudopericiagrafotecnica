@@ -28,7 +28,8 @@ def substituir_em_paragrafo(paragrafo, dados: dict):
                 texto_original = texto_original.replace("[NUMEROS]", str(valor))
                 paragrafo.text = texto_original # Atualiza o parágrafo antes de quebrar para run
                 
-            valor_str = str(valor) if not isinstance(valor, list) else ""
+            # Verifica se o valor não é uma lista, se for, ignora (listas são tratadas em outra função)
+            valor_str = str(valor) if not isinstance(valor, list) and not isinstance(valor, dict) else ""
             
             if valor_str:
                 for run in paragrafo.runs:
@@ -60,28 +61,128 @@ def inserir_lista_no_paragrafo(doc, marcador, lista: List[str]):
 
 def inserir_imagens_em_secao(doc: Document, titulo: str, adendos: List[Dict[str, Any]], prefixo: str):
     """Insere o título da seção e as imagens dos adendos."""
-    if not adendos:
+    
+    # Filtra adendos que possuem imagem_obj (BytesIO)
+    imagens_para_inserir = [a for a in adendos if a.get("imagem_obj") and a.get("imagem_obj").getbuffer().nbytes > 0]
+    
+    if not imagens_para_inserir:
         return
         
     doc.add_heading(titulo, level=2)
     
-    for i, adendo in enumerate(adendos):
+    for i, adendo in enumerate(imagens_para_inserir):
         legenda = adendo.get("legenda", f"{prefixo} {i+1}")
-        file_obj = adendo.get("imagem_obj")
+        file_obj_buffer = adendo.get("imagem_obj") # É um BytesIO
         
-        if file_obj:
-            try:
-                # Insere a imagem
-                doc.add_picture(file_obj, width=Inches(6))
-                
-                # Adiciona a legenda
-                doc.add_paragraph(legenda, style='Caption') 
-                
-            except Exception as e:
-                # Em caso de erro com a imagem (pode ocorrer se o objeto não for mais válido)
-                doc.add_paragraph(f"ERRO: Não foi possível inserir a imagem: {legenda}. {e}")
+        try:
+            # Garante que o buffer esteja no início antes de ler
+            file_obj_buffer.seek(0) 
+            
+            # Insere a imagem usando o BytesIO
+            doc.add_picture(file_obj_buffer, width=Inches(6))
+            
+            # Adiciona a legenda
+            p = doc.add_paragraph(legenda)
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            
+        except Exception as e:
+            # Em caso de erro com a imagem 
+            doc.add_paragraph(f"ERRO: Não foi possível inserir a imagem: {legenda}. {e}")
 
 # --- FUNÇÕES DE GERAÇÃO DE CONTEÚDO DINÂMICO ---
+
+def gerar_bloco_analise_dinamica(doc: Document, dados: dict):
+    """
+    Gera o bloco de texto dinâmico para o 5.2. Confronto Grafoscópico (Analise dos EOGs).
+    Substitui a lista padronizada do template pela lista filtrada.
+    """
+    # 1. Prepara a lista de EOGs analisados
+    eog_data = dados.get('EOG_ANALYSIS', {})
+    
+    # Filtra apenas Convergente e Divergente
+    analise_list = [
+        f"**{element}**: {conclusion}"
+        for element, conclusion in eog_data.items() 
+        if conclusion in ["Convergente", "Divergente"]
+    ]
+    
+    # 2. Encontra a seção 5.2 no template para inserir a lista de EOGs
+    paragrafo_ref_52 = None
+    
+    # Usamos uma lista de referências do template
+    ref_list = [
+        "Natureza do Gesto Gráfico: Velocidade, pressão, espontaneidade.", 
+        "Valores Angulares e Curvilíneos: Inclinação dos traços."
+    ]
+    
+    for p in doc.paragraphs:
+        if any(ref in p.text for ref in ref_list):
+            paragrafo_ref_52 = p
+            break
+            
+    if not paragrafo_ref_52:
+        return # Se não encontrar o ponto de inserção, não faz nada.
+
+    # 3. Se a lista de análise estiver vazia, remove os pontos de referência
+    if not analise_list:
+        for p in doc.paragraphs:
+            if "Foram buscadas convergências" in p.text:
+                p.text = ""
+            for ref in ref_list:
+                if ref in p.text:
+                    p.text = ""
+        return
+        
+    # 4. Remove as listas padronizadas (placeholders)
+    paragrafos_a_remover = []
+    
+    for p in doc.paragraphs:
+        for ref in ref_list:
+            if ref in p.text:
+                paragrafos_a_remover.append(p)
+                
+    for p_rem in paragrafos_a_remover:
+        p_rem.text = "" # Apaga o texto dos itens padrões
+
+    # 5. Insere os novos itens dinâmicos
+    for item in analise_list:
+        novo_paragrafo = paragrafo_ref_52.insert_paragraph_before(f"- {item}")
+        
+    # 6. Adiciona a quebra de linha para o texto livre (ANALISE_TEXTO)
+    paragrafo_ref_52.insert_paragraph_before("")
+    paragrafo_ref_52.insert_paragraph_before(dados.get('ANALISE_TEXTO', ''))
+
+
+# ... (Funções gerar_bloco_documentos_questionados, gerar_bloco_padroes_encontrados, gerar_bloco_conclusao_dinamico e gerar_bloco_respostas_quesitos do refatoramento anterior permanecem aqui)
+def gerar_bloco_conclusao_dinamico(dados: dict) -> str:
+    """Gera o bloco de conclusão formatado em negrito com o tipo principal."""
+    tipo = dados.get('CONCLUSÃO_TIPO', 'Inconclusiva')
+    texto = dados.get('CONCLUSION', '')
+    
+    if tipo == "Selecione a Conclusão":
+        return ""
+
+    # Usa o formato de negrito e caixa alta no tipo de conclusão
+    return f"**{tipo.upper()}**.\n{texto}"
+
+def gerar_bloco_respostas_quesitos(dados: dict, parte: str) -> str:
+    """Gera o bloco de respostas aos quesitos de uma parte (Autor ou Réu)."""
+    respostas = dados.get('RESPOSTAS_QUESITOS_LIST', [])
+    
+    bloco_texto = []
+    
+    # Filtra as respostas para a parte específica
+    respostas_filtradas = [r for r in respostas if r['parte'] == parte]
+    
+    if not respostas_filtradas:
+        return f"Não foram apresentados quesitos pela parte {parte}."
+
+    for r in respostas_filtradas:
+        # Formato: X.1. Quesito: [Texto do Quesito] Resposta: [Texto da Resposta]
+        bloco_texto.append(f"**Quesito {r['id']}:** {r['quesito']}\n**Resposta:** {r['resposta']}\n")
+        
+    # Converte a lista de strings formatadas em uma única string com quebras de linha
+    return "\n".join(bloco_texto)
 
 def gerar_bloco_documentos_questionados(doc: Document, dados: dict):
     """Gera a lista de Documentos Questionados (4.1) no corpo do laudo, substituindo os placeholders 0 a 5."""
@@ -96,6 +197,7 @@ def gerar_bloco_documentos_questionados(doc: Document, dados: dict):
         texto_doc = ""
         if i < len(docs):
             d = docs[i]
+            # O texto completo que substitui o bloco da linha Documento X:
             texto_doc = f"{d['tipo']}, nº {d['numero']}, datado de {d['data']}, fls. {d['fls']}."
         
         # Procura e substitui todos os placeholders para este documento
@@ -103,17 +205,28 @@ def gerar_bloco_documentos_questionados(doc: Document, dados: dict):
             if placeholder_tipo in paragrafo.text:
                 if texto_doc:
                     # Tenta substituir o bloco completo (Documento X: [TIPO_DOCUMENTO_X]...)
-                    padrao_completo = re.compile(r"Documento\s+" + str(i+1) + r":\s*" + re.escape(placeholder_tipo) + r"(.*)")
+                    padrao_completo = re.compile(r"Documento\s+" + str(i+1) + r":\s*" + re.escape(placeholder_tipo) + r".*")
+                    
                     if padrao_completo.search(paragrafo.text):
+                        # Se encontrar o padrão, substitui a linha inteira
                         paragrafo.text = re.sub(padrao_completo, f"Documento {i+1}: {texto_doc}", paragrafo.text)
                     else:
+                        # Se não encontrar o padrão completo, faz a substituição individual (mais robusto)
                         paragrafo.text = paragrafo.text.replace(placeholder_tipo, d['tipo'])
                         paragrafo.text = paragrafo.text.replace(placeholder_num, d['numero'])
                         paragrafo.text = paragrafo.text.replace(placeholder_data, d['data'])
                         paragrafo.text = paragrafo.text.replace(placeholder_fls, d['fls'])
                 else:
                     # Remove a linha se não houver documento
-                    paragrafo.text = "" 
+                    # Remove a linha Documento X: ...
+                    padrao_completo = re.compile(r"Documento\s+" + str(i+1) + r":\s*" + re.escape(placeholder_tipo) + r".*")
+                    if padrao_completo.search(paragrafo.text):
+                        paragrafo.text = ""
+                    else:
+                        paragrafo.text = paragrafo.text.replace(placeholder_tipo, "")
+                        paragrafo.text = paragrafo.text.replace(placeholder_num, "")
+                        paragrafo.text = paragrafo.text.replace(placeholder_data, "")
+                        paragrafo.text = paragrafo.text.replace(placeholder_fls, "")
 
 def gerar_bloco_padroes_encontrados(doc: Document, dados: dict):
     """Gera a lista de Padrões Encontrados nos Autos (4.2.B)."""
@@ -127,7 +240,6 @@ def gerar_bloco_padroes_encontrados(doc: Document, dados: dict):
     for p in doc.paragraphs:
         if "Documento 1:" in p.text and placeholder_base in p.text:
             paragrafo_encontrado = p
-            paragrafos_a_remover.append(p)
         elif "Documento 2:" in p.text and placeholder_base in p.text:
             paragrafos_a_remover.append(p)
 
@@ -135,7 +247,7 @@ def gerar_bloco_padroes_encontrados(doc: Document, dados: dict):
         return
 
     # Remove os parágrafos de Documento 2 e 3 (se existirem)
-    for p_rem in paragrafos_a_remover[1:]:
+    for p_rem in paragrafos_a_remover:
         p_rem.text = ""
 
     for i, p in enumerate(padroes):
@@ -153,7 +265,7 @@ def gerar_laudo(
     caminho_modelo: str, 
     caminho_saida: str, 
     dados: dict, 
-    adendos: List[Dict[str, Any]] # Para o Bloco 6
+    adendos: List[Dict[str, Any]] # Agora inclui os objetos BytesIO da EOG
 ):
     
     doc = Document(caminho_modelo)
@@ -178,40 +290,42 @@ def gerar_laudo(
     dados['NOME DO AUTOR'] = dados['PRIMEIRO_AUTOR']
     dados['NOME COMPLETO DO PERITO'] = dados.get('PERITO', '')
     dados['NÚMERO DE REGISTRO'] = dados.get('NUMERO_REGISTRO', '')
-
-    # --- 2. Geração de Blocos Dinâmicos de Texto ---
     
-    # Conclusão Dinâmica
+    # Bloco de conclusão dinâmico (tratado como substituição de texto simples)
     dados['BLOCO_CONCLUSAO_DINAMICO'] = gerar_bloco_conclusao_dinamico(dados)
     
-    # Respostas aos Quesitos
+    # Bloco de respostas aos quesitos
     dados['BLOCO_QUESITOS_AUTOR'] = gerar_bloco_respostas_quesitos(dados, 'Autor')
     dados['BLOCO_QUESITOS_REU'] = gerar_bloco_respostas_quesitos(dados, 'Réu')
     
-    # --- 3. Substituição em Parágrafos e Tabelas (Geral) ---
+    # --- 2. Substituição em Parágrafos e Tabelas (Geral) ---
     
     for paragrafo in doc.paragraphs:
         
-        # 3.1. Substituição do cabeçalho (Resumo)
+        # 2.1. Substituição do cabeçalho (Resumo)
         if "[NUMERO DO PROCESSO]Autor: [nome do autor]Réu: [nome do réu]" in paragrafo.text:
             texto_resumo = f"{dados.get('numero_processo', '')} Autor: {dados.get('PRIMEIRO_AUTOR', '')} Réu: {dados.get('NOME COMPLETO DO RÉU', '')}"
             paragrafo.text = paragrafo.text.replace(f"Processo: [NUMERO DO PROCESSO]Autor: [nome do autor]Réu: [nome do réu]", f"Processo: {texto_resumo}")
         
-        # 3.2. Substituição de campos simples (inclui os novos: VARA, NUMERO_REGISTRO, NUM_ESPECIMES, etc.)
+        # 2.2. Substituição de campos simples (inclui os novos: VARA, NUMERO_REGISTRO, NUM_ESPECIMES, etc.)
         substituir_em_paragrafo(paragrafo, dados)
 
     for tabela in doc.tables:
         substituir_em_tabela(tabela, dados)
 
-    # --- 4. Inserção de Listas e Conteúdo Estruturado ---
+    # --- 3. Inserção de Listas e Conteúdo Estruturado ---
     
-    # 4.1. Inserção dos Documentos Questionados (4.1)
+    # 3.1. Inserção dos Documentos Questionados (4.1)
     gerar_bloco_documentos_questionados(doc, dados)
     
-    # 4.2. Inserção dos Padrões Encontrados (4.2.B)
+    # 3.2. Inserção dos Padrões Encontrados (4.2.B)
     gerar_bloco_padroes_encontrados(doc, dados)
 
-    # 4.3. Inserção de Adendos Gráficos (Bloco 6)
+    # 3.3. Geração e Inserção da Análise Detalhada de EOG (5.2)
+    # ATENÇÃO: Esta função deve ser chamada após a substituição geral para remover os placeholders existentes no 5.2.
+    gerar_bloco_analise_dinamica(doc, dados)
+    
+    # 3.4. Inserção de Adendos Gráficos (Bloco 6) - Inclui Tabela e Gráfico EOG
     inserir_imagens_em_secao(doc, "6. ADENDOS GRÁFICOS", adendos, "Adendo")
 
     doc.save(caminho_saida)

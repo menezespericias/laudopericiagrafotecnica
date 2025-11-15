@@ -4,6 +4,11 @@ import json
 from datetime import date, datetime
 from num2words import num2words
 from typing import List, Dict, Any, Union
+import pandas as pd
+import matplotlib.pyplot as plt
+import io
+import base64 
+
 from word_handler import gerar_laudo
 from data_handler import save_process_data, load_process_data
 from db_handler import atualizar_status
@@ -22,6 +27,21 @@ DATA_FOLDER = os.path.join(PROJECT_ROOT, "data")
 
 os.makedirs(DATA_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+# --- Lista de Elementos de Ordem Gráfica (EOG) para Análise Dinâmica ---
+EOG_ELEMENTS = [
+    "Habilidade Gráfica",
+    "Velocidade do Traçado",
+    "Calibre Gráfico",
+    "Pressão (Calibragem)",
+    "Inclinação Axial",
+    "Espontaneidade e Dinamismo",
+    "Ritmo Gráfico",
+    "Valores Angulares e Curvilíneos (Morfologia)",
+    "Ataques e Remates",
+    "Espaçamento Inter-letras e Inter-palavras",
+    "Pontos de Conexão e Ligação"
+]
 
 # --- Funções de Callback (Defesa na Escrita) ---
 
@@ -71,7 +91,6 @@ def add_list_item(key: str, item_data: dict, list_key: str = None):
     
     item_data['id'] = len(st.session_state[final_key]) + 1
     st.session_state[final_key].append(item_data)
-    # Não usamos st.rerun() aqui, a re-renderização acontece no final do formulário ou com o botão de salvar.
 
 def remove_list_item(list_key: str, item_id: int):
     if list_key in st.session_state:
@@ -79,6 +98,119 @@ def remove_list_item(list_key: str, item_id: int):
         for i, item in enumerate(st.session_state[list_key]):
             item['id'] = i + 1
         st.rerun()
+
+# --- Funções de Geração de Gráfico/Tabela ---
+
+def generate_eog_chart_and_table_images(eog_data: dict):
+    """
+    Gera as imagens da Tabela e do Gráfico a partir dos dados EOG.
+    Retorna uma lista de objetos BytesIO para os adendos.
+    """
+    # 1. Preparar Dados para Plotagem e Tabela
+    results = [v for k, v in eog_data.items() if v != "Não Analisado"]
+    
+    # Criar DataFrame para a Tabela
+    table_data = {
+        "Elemento Gráfico": [k for k, v in eog_data.items() if v != "Não Analisado"],
+        "Conclusão": results
+    }
+    df_table = pd.DataFrame(table_data)
+    
+    # Criar Series para o Gráfico
+    count_data = pd.Series(results).value_counts()
+    
+    adendos_gerados = []
+
+    # 2. Gerar Imagem da Tabela (Matplotlib)
+    if not df_table.empty:
+        fig_table, ax_table = plt.subplots(figsize=(8, (len(df_table) * 0.4) + 1.5))
+        ax_table.axis('off')
+        ax_table.axis('tight')
+        
+        # Cria a tabela de Matplotlib
+        table = ax_table.table(
+            cellText=df_table.values, 
+            colLabels=df_table.columns, 
+            cellLoc='center', 
+            loc='center',
+            bbox=[0, 0, 1, 1]
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(10)
+        table.scale(1, 1.5)
+
+        buf_table = io.BytesIO()
+        fig_table.savefig(buf_table, format='png', bbox_inches='tight')
+        buf_table.seek(0)
+        plt.close(fig_table)
+        
+        adendos_gerados.append({
+            "legenda": "Tabela I: Resumo da Análise dos Elementos de Ordem Gráfica (EOG)",
+            "imagem_obj": buf_table,
+            "id": "EOG_Table"
+        })
+
+    # 3. Gerar Imagem do Gráfico (Matplotlib - Barra)
+    if not count_data.empty:
+        fig_chart, ax_chart = plt.subplots(figsize=(6, 4))
+        
+        # Cores para Convergente/Divergente
+        colors = {'Convergente': 'green', 'Divergente': 'red', 'Outro': 'gray'}
+        bar_colors = [colors.get(c, 'gray') for c in count_data.index]
+        
+        count_data.plot(kind='bar', ax=ax_chart, color=bar_colors)
+        
+        ax_chart.set_title("Gráfico de Confronto Grafoscópico")
+        ax_chart.set_ylabel("Contagem de Elementos")
+        ax_chart.set_xlabel("Conclusão")
+        ax_chart.tick_params(axis='x', rotation=0)
+        plt.tight_layout()
+        
+        buf_chart = io.BytesIO()
+        fig_chart.savefig(buf_chart, format='png', bbox_inches='tight')
+        buf_chart.seek(0)
+        plt.close(fig_chart)
+        
+        adendos_gerados.append({
+            "legenda": "Gráfico I: Percentual de Convergência e Divergência Encontradas",
+            "imagem_obj": buf_chart,
+            "id": "EOG_Chart"
+        })
+        
+    return adendos_gerados
+
+
+def save_eog_analysis():
+    """Gera e salva as imagens de tabela e gráfico nos adendos de sessão."""
+    
+    if "EOG_ANALYSIS" not in st.session_state:
+        st.error("Dados da análise EOG não encontrados.")
+        return
+        
+    # 1. Gera as imagens
+    new_adendos = generate_eog_chart_and_table_images(st.session_state.EOG_ANALYSIS)
+    
+    if not new_adendos:
+        st.info("Nenhum elemento analisado para gerar Adendos.")
+        return
+
+    # 2. Remove Adendos EOG antigos (se houver)
+    # Filtra e mantém apenas os adendos não-EOG
+    existing_adendos = st.session_state.get("adendos", [])
+    
+    st.session_state.adendos = [
+        a for a in existing_adendos if a.get("id") not in ["EOG_Table", "EOG_Chart"]
+    ]
+    
+    # 3. Adiciona os novos adendos EOG
+    for new_adendo in new_adendos:
+        # Garante que o ID do adendo seja único
+        new_adendo['id'] = new_adendo.get('id') if 'id' in new_adendo else len(st.session_state.adendos) + 1
+        st.session_state.adendos.append(new_adendo)
+        
+    st.success(f"✅ Tabela e Gráfico EOG gerados e salvos como Adendos.")
+    st.rerun()
+
 
 # --- Inicialização do Estado de Sessão (INCLUINDO NOVOS CAMPOS) ---
 def init_session_state():
@@ -111,7 +243,7 @@ def init_session_state():
         # Etapa 6
         "HONORARIOS_VALOR", "HONORARIOS_VENCIMENTO", "CONCLUSÃO_TIPO", "CONCLUSION", "RESPOSTAS_QUESITOS_MAP", "NUM_LAUDAS",
         # Outros
-        "status_db"
+        "status_db", "EOG_ANALYSIS" # NOVO CAMPO PARA EOG
     ]
     for campo in campos_base:
         if campo not in st.session_state:
@@ -123,6 +255,8 @@ def init_session_state():
                 st.session_state[campo] = "Selecione a Conclusão"
             elif campo == "RESPOSTAS_QUESITOS_MAP":
                 st.session_state[campo] = {}
+            elif campo == "EOG_ANALYSIS": # Inicializa o EOG_ANALYSIS
+                st.session_state[campo] = {e: "Não Analisado" for e in EOG_ELEMENTS}
             else:
                 st.session_state[campo] = ""
 
@@ -401,11 +535,64 @@ with st.expander("4. Análise dos Paradigmas e Metodologia (Bloco 5)"):
 
 st.markdown("---")
 
-# --- ETAPA 5: ANÁLISE COMPARATIVA E ADENDOS (5.2 e 6) ---
-with st.expander("5. Análise Comparativa e Adendos (Blocos 5.2 e 6)"):
+# --- NOVO BLOCO: ETAPA 5 - ANÁLISE DETALHADA EOG ---
+with st.expander("5. Análise Detalhada (EOG) e Adendos Gráficos (Blocos 5.2 e 6)", expanded=True):
     
-    st.subheader("5.2. Confronto Grafoscópico - Análise Comparativa")
-    st.session_state.ANALISE_TEXTO = st.text_area("Descrição Detalhada da Análise e dos Elementos Gráficos Confrontados", 
+    st.subheader("5.1. Análise Comparativa Detalhada (EOG)")
+    st.markdown("Marque se cada elemento de ordem gráfica (EOG) é **Convergente** ou **Divergente** em relação aos padrões, ou **Não Analisado**.")
+    
+    col_eog1, col_eog2 = st.columns([2, 1])
+    
+    # 1. Tabela de Seleção EOG
+    with col_eog1:
+        st.markdown("**Elemento de Ordem Gráfica** | **Conclusão**")
+        st.markdown("|---|---|")
+        
+        for element in EOG_ELEMENTS:
+            # Garante que o estado de sessão está atualizado
+            if element not in st.session_state.EOG_ANALYSIS:
+                 st.session_state.EOG_ANALYSIS[element] = "Não Analisado"
+                 
+            col_el, col_sel = st.columns([2, 2])
+            
+            with col_el:
+                st.markdown(element)
+            
+            with col_sel:
+                st.session_state.EOG_ANALYSIS[element] = st.selectbox(
+                    "Conclusão",
+                    ["Convergente", "Divergente", "Não Analisado"],
+                    key=f"eog_select_{element}",
+                    index=["Convergente", "Divergente", "Não Analisado"].index(st.session_state.EOG_ANALYSIS[element]),
+                    label_visibility="collapsed"
+                )
+
+        if st.button("📊 Gerar Tabela e Gráfico de Confronto (Adendo)"):
+            save_eog_analysis()
+
+    # 2. Pré-visualização dos Adendos EOG
+    with col_eog2:
+        st.subheader("Pré-visualização (Adendos)")
+        eog_adendos = [a for a in st.session_state.get("adendos", []) if a.get("id") in ["EOG_Table", "EOG_Chart"]]
+        
+        if eog_adendos:
+            for adendo in eog_adendos:
+                st.info(f"💾 Adendo: {adendo['legenda']}")
+                
+                # Para mostrar a imagem na pré-visualização, precisamos re-renderizá-la
+                if adendo['imagem_obj']:
+                    # Reseta o ponteiro do BytesIO para o início antes de ler
+                    adendo['imagem_obj'].seek(0)
+                    st.image(adendo['imagem_obj'], caption=adendo['legenda'])
+                    # Volta o ponteiro para o início para que o word_handler possa ler novamente
+                    adendo['imagem_obj'].seek(0) 
+        else:
+            st.warning("Gere a Tabela e o Gráfico para incluí-los como Adendos.")
+
+    st.markdown("---")
+    
+    st.subheader("5.2. Confronto Grafoscópico - Análise Comparativa (Texto Livre)")
+    st.session_state.ANALISE_TEXTO = st.text_area("Descrição Detalhada da Análise e dos Elementos Gráficos Confrontados (Este texto será adicionado após a lista de EOGs dinâmicas)", 
                                                   value=st.session_state.get("ANALISE_TEXTO", ""), height=500)
     
     st.markdown("---")
@@ -415,21 +602,27 @@ with st.expander("5. Análise Comparativa e Adendos (Blocos 5.2 e 6)"):
         novo_adendo_legenda = st.text_input("Legenda do Adendo (Ex: Figura 1: Comparativo de Assinaturas)", key="input_adendo_legenda")
         imagem_adendo = st.file_uploader("Imagem do Adendo", type=['png', 'jpg', 'jpeg'], key="upload_adendo")
         
-        if st.form_submit_button("➕ Adicionar Adendo Gráfico"):
+        if st.form_submit_button("➕ Adicionar Outro Adendo Gráfico"):
             if novo_adendo_legenda and imagem_adendo:
-                item_data = {"legenda": novo_adendo_legenda, "imagem_obj": imagem_adendo}
+                
+                # Converte o UploadedFile para BytesIO
+                bytes_data = io.BytesIO(imagem_adendo.getvalue())
+                
+                item_data = {"legenda": novo_adendo_legenda, "imagem_obj": bytes_data}
                 add_list_item("adendos", item_data)
             else: st.error("A legenda e a imagem são obrigatórias para o Adendo.")
 
     if st.session_state.adendos:
-        st.markdown("**Adendos Adicionados:**")
-        for d in st.session_state.adendos:
+        st.markdown("**Outros Adendos Adicionados:**")
+        # Mostra apenas os adendos não-EOG
+        outros_adendos = [a for a in st.session_state.adendos if a.get("id") not in ["EOG_Table", "EOG_Chart"]]
+        for d in outros_adendos:
             col_d1, col_d2 = st.columns([4, 1])
-            col_d1.write(f"**Adendo {d['id']}:** {d['legenda']}")
-            if col_d2.button("🗑️ Remover", key=f"del_adendo_{d['id']}"): remove_list_item("adendos", d['id'])
-    
+            col_d1.write(f"**Adendo {d.get('id', 'N/A')}**: {d['legenda']}")
+            if col_d2.button("🗑️ Remover", key=f"del_adendo_{d.get('id', d['legenda'])}"): remove_list_item("adendos", d['id'])
+
     if isinstance(st.session_state.etapas_concluidas, set):
-        st.session_state.etapas_concluidas.add(5)
+        st.session_state.etapas_concluidas.add(5) # Atualiza o número da etapa
 
 st.markdown("---")
 
@@ -506,12 +699,18 @@ st.markdown("---")
 with st.expander("7. Gerar Laudo Final", expanded=(7 in st.session_state.etapas_concluidas if isinstance(st.session_state.etapas_concluidas, set) else False)):
     st.subheader("Configurações de Geração")
     
+    # Assegura que o número de processo está presente antes de salvar.
+    if not st.session_state.numero_processo:
+        st.error("Número do Processo não definido. Volte à Etapa 1.")
+        st.stop()
+        
     caminho_saida = os.path.join(OUTPUT_FOLDER, f"Laudo_{st.session_state.numero_processo}.docx")
     
     st.write(f"Modelo a ser usado: **{os.path.basename(CAMINHO_MODELO)}**")
     st.write(f"Arquivo de saída: **{os.path.basename(caminho_saida)}** (salvo em `{os.path.basename(OUTPUT_FOLDER)}/`)")
 
-    is_disabled = not(isinstance(st.session_state.etapas_concluidas, set) and len(st.session_state.etapas_concluidas) >= 6)
+    # Verifica se todas as etapas mínimas (1 a 6) foram concluídas
+    is_disabled = not(isinstance(st.session_state.etapas_concluidas, set) and {1, 2, 3, 4, 5, 6}.issubset(st.session_state.etapas_concluidas))
 
     if st.button("🚀 Gerar Documento .DOCX", type="primary", disabled=is_disabled):
         
@@ -519,8 +718,11 @@ with st.expander("7. Gerar Laudo Final", expanded=(7 in st.session_state.etapas_
         update_vencimento_date()
         update_colheita_date()
         
+        # 1. Prepara os dados para o word_handler
+        # Copia todos os dados do session_state, exceto metadados de UI
         dados_simples = {k: v for k, v in st.session_state.items() if not k.startswith("editing_") and k not in ["process_to_load", "etapas_concluidas"]}
         
+        # Processa Autor/Réu para nomes
         dados_simples['AUTORES'] = [a.strip() for a in dados_simples.get('autor', '').split('\n') if a.strip()]
         dados_simples['REUS'] = [r.strip() for r in dados_simples.get('reu', '').split('\n') if r.strip()]
         
@@ -533,7 +735,7 @@ with st.expander("7. Gerar Laudo Final", expanded=(7 in st.session_state.etapas_
             try:
                 parte, q_id = key.split('_')
             except ValueError:
-                continue # Pula chaves mal formatadas
+                continue 
                 
             if parte == 'Autor':
                 lista_quesitos = dados_simples.get('quesitos_autor', [])
@@ -551,18 +753,20 @@ with st.expander("7. Gerar Laudo Final", expanded=(7 in st.session_state.etapas_
         dados_simples['RESPOSTAS_QUESITOS_LIST'] = respostas_quesitos_list
         
         try:
+            # 2. Gera o Laudo
             gerar_laudo(
                 caminho_modelo=CAMINHO_MODELO,
                 caminho_saida=caminho_saida,
                 dados=dados_simples,
-                # Passamos as listas de imagens (adendos) para o word_handler, se necessário
+                # Passa a lista completa de adendos (incluindo os EOGs gerados)
                 adendos=st.session_state.adendos 
             )
             
+            # 3. Finaliza
             if isinstance(st.session_state.etapas_concluidas, set):
                 st.session_state.etapas_concluidas.add(7) 
             
-            if save_current_state():
+            if save_current_state(): # Salva o estado final, incluindo a análise EOG e os adendos
                  st.success(f"Laudo **{st.session_state.numero_processo}** gerado com sucesso!")
             
             with open(caminho_saida, "rb") as file:
