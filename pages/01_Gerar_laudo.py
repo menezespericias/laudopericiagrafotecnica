@@ -18,47 +18,86 @@ CAMINHO_MODELO = "LAUDO PERICIAL GRAFOTÉCNICO.docx"
 OUTPUT_FOLDER = "output"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# --- Funções Auxiliares ---
+# --- Funções de Callback (Defesa na Escrita) ---
+
+def update_session_date_format(key_data: str, key_input: str):
+    """
+    Callback para forçar que a data salva no session_state (key_data)
+    seja sempre uma STRING no formato DD/MM/YYYY, usando o valor do widget (key_input).
+    """
+    try:
+        # Pega o objeto date retornado pelo widget st.date_input
+        date_object = st.session_state[key_input]
+        
+        # Converte o objeto date para a string no formato desejado
+        if isinstance(date_object, date):
+            st.session_state[key_data] = date_object.strftime("%d/%m/%Y")
+        # Tratamento defensivo caso o Streamlit retorne uma lista de uma data (muito raro)
+        elif isinstance(date_object, (list, tuple)) and date_object and isinstance(date_object[0], date):
+            st.session_state[key_data] = date_object[0].strftime("%d/%m/%Y")
+            
+    except KeyError:
+        # Se a chave do input não existir (ex: widget ainda não foi renderizado), ignora
+        pass
+    except Exception as e:
+        # Em produção, você pode remover st.error, mas mantive para debug
+        st.error(f"Erro no callback de data para {key_data}: {e}")
+
+def update_laudo_date():
+    """Callback para a data de conclusão do laudo."""
+    update_session_date_format("DATA_LAUDO", "input_data_laudo")
+
+def update_vencimento_date():
+    """Callback para a data de vencimento dos honorários."""
+    update_session_date_format("HONORARIOS_VENCIMENTO", "input_data_vencimento")
+
+
+# --- Funções Auxiliares (Defesa na Leitura) ---
 
 def get_date_object_from_state(key: str) -> date:
-    """Extrai e valida um valor de data do session_state, convertendo strings/listas para date.
-    
-    Esta função garante que o valor passado ao st.date_input seja SEMPRE um objeto date único.
+    """
+    Extrai e valida um valor de data do session_state, convertendo strings/listas para date.
+    Esta função é CRÍTICA para garantir que o 'value' do st.date_input seja um objeto date.
     """
     data_val = st.session_state.get(key)
     
+    # 1. TRATAMENTO CRÍTICO (Corrige o TypeError): Se for uma lista, pega o primeiro item.
     if isinstance(data_val, (list, tuple)):
-        # TRATAMENTO CRÍTICO: Se for uma lista (causa do TypeError), tenta pegar o primeiro item
         if data_val:
+            # Pega o primeiro elemento, que deve ser a string ou o objeto date
             data_val = data_val[0]
         else:
-            return date.today() # Lista vazia, volta para hoje
+            return date.today()
 
+    # 2. Tenta converter a string "DD/MM/YYYY" para objeto date
     if isinstance(data_val, str) and data_val:
-        # Tenta converter a string "DD/MM/YYYY" (do JSON) para objeto date
         try:
-            # Assumindo que a string salva no session_state é DD/MM/YYYY
             return datetime.strptime(data_val, "%d/%m/%Y").date()
         except:
-            pass # Falhou, continua para o fallback
+            pass # Falha na conversão da string, continua para o fallback
 
+    # 3. Se já for um objeto date válido, retorna
     elif isinstance(data_val, date):
-        # É um objeto date válido (após a primeira edição)
         return data_val
 
-    # Fallback para data atual se a conversão falhar ou o tipo for inesperado
+    # 4. Fallback (data atual)
     return date.today()
+
 
 def init_session_state():
     """Inicializa as chaves do session_state que não existem."""
     if 'editing_etapa_1' not in st.session_state:
         st.session_state.editing_etapa_1 = True
 
-    # Garante que etapas_concluidas seja sempre um SET.
+    # CORREÇÃO CRÍTICA DO AttributeError: Garante que etapas_concluidas seja sempre um SET.
     if 'etapas_concluidas' not in st.session_state:
         st.session_state.etapas_concluidas = set()
-    elif isinstance(st.session_state.etapas_concluidas, list):
-        st.session_state.etapas_concluidas = set(st.session_state.etapas_concluidas)
+    elif not isinstance(st.session_state.etapas_concluidas, set):
+        try:
+            # Coerge para set se for lista ou outro iterável carregado do JSON
+            st.session_state.etapas_concluidas = set(st.session_state.etapas_concluidas)
+        except:
+            st.session_state.etapas_concluidas = set() # Se falhar, inicializa vazio
 
     # Campos da Etapa 1
     if 'numero_processo' not in st.session_state:
@@ -89,7 +128,7 @@ def init_session_state():
     ]
     for campo in campos_base:
         if campo not in st.session_state:
-            # Inicializa datas como string "hoje" no formato esperado
+            # Inicializa datas como string "hoje" no formato esperado (Defesa 1)
             if campo in ["DATA_LAUDO", "HONORARIOS_VENCIMENTO"]:
                 st.session_state[campo] = date.today().strftime("%d/%m/%Y")
             else:
@@ -101,10 +140,14 @@ def save_current_state():
         process_id = st.session_state.numero_processo
         
         try:
-            # Salva os dados no JSON
+            # Garante que as datas nos inputs foram salvas no session_state como strings antes de salvar o JSON
+            update_laudo_date()
+            update_vencimento_date()
+            
+            # 1. Salva os dados no JSON
             save_process_data(process_id, st.session_state)
             
-            # ATUALIZA o status no banco de dados SQLite
+            # 2. ATUALIZA o status no banco de dados SQLite
             NOVO_STATUS = "Em andamento"
             atualizar_status(process_id, NOVO_STATUS)
             
@@ -149,8 +192,10 @@ if "process_to_load" in st.session_state and st.session_state["process_to_load"]
     process_id = st.session_state["process_to_load"]
     
     try:
+        # Usa a função do data_handler para carregar
         dados_carregados = load_process_data(process_id)
         
+        # Carrega os dados para o session_state, sobrescrevendo valores existentes
         for key, value in dados_carregados.items():
             st.session_state[key] = value
 
@@ -203,19 +248,23 @@ with st.expander(f"1. Dados Básicos do Processo - {st.session_state.numero_proc
         st.session_state.reu = st.text_area("Réu(s) (Um por linha)", value=st.session_state.get("reu", ""))
 
     with col3:
-        # Usa a função robusta para obter um objeto date único
+        # Defesa na Leitura: Obtém um objeto date único, tratando listas e strings corrompidas.
         data_obj = get_date_object_from_state("DATA_LAUDO")
             
-        # 4. Renderiza o widget e captura o objeto date retornado
-        data_input_result = st.date_input("Data da Conclusão do Laudo", value=data_obj, key="input_data_laudo")
-        
-        # CORREÇÃO CRÍTICA: Converte o objeto date retornado pelo widget para a string esperada para o JSON
-        st.session_state.DATA_LAUDO = data_input_result.strftime("%d/%m/%Y")
+        st.date_input(
+            "Data da Conclusão do Laudo", 
+            value=data_obj, 
+            key="input_data_laudo",
+            # Defesa na Escrita: Força o salvamento como string assim que o valor muda.
+            on_change=update_laudo_date
+        )
         
         st.session_state.PERITO = st.text_input("Nome do Perito", value=st.session_state.get("PERITO", ""))
         st.session_state.ESPECIALIZACAO = st.text_input("Especialização (Ex: Grafotécnico)", value=st.session_state.get("ESPECIALIZACAO", ""))
         
     if st.button("💾 Salvar Dados Básicos (Etapa 1)"):
+        # Garante que o valor final do input seja salvo no formato string antes de salvar o JSON
+        update_laudo_date()
         if save_current_state():
             st.session_state.editing_etapa_1 = False
             st.rerun()
@@ -393,16 +442,17 @@ with st.expander("7. Conclusão e Informações Finais"):
         st.session_state.HONORARIOS_VALOR = st.text_input("Valor dos Honorários (R$)", 
                                                           value=st.session_state.get("HONORARIOS_VALOR", ""))
     with col_h2:
-        # Usa a função robusta para obter um objeto date único
+        # Defesa na Leitura: Obtém um objeto date único, tratando listas e strings corrompidas.
         data_obj_v = get_date_object_from_state("HONORARIOS_VENCIMENTO")
             
-        # 4. Renderiza o widget e captura o objeto date retornado
-        data_vencimento_result = st.date_input("Data de Vencimento do Pagamento", 
-                                                               value=data_obj_v, key="input_data_vencimento")
+        st.date_input(
+            "Data de Vencimento do Pagamento", 
+            value=data_obj_v, 
+            key="input_data_vencimento",
+            # Defesa na Escrita: Força o salvamento como string assim que o valor muda.
+            on_change=update_vencimento_date
+        )
         
-        # CORREÇÃO CRÍTICA: Converte o objeto date retornado pelo widget para a string esperada para o JSON
-        st.session_state.HONORARIOS_VENCIMENTO = data_vencimento_result.strftime("%d/%m/%Y")
-
     st.session_state.etapas_concluidas.add(7)
 
 st.markdown("---")
@@ -418,6 +468,10 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
     st.write(f"Arquivo de saída: **{caminho_saida}**")
 
     if st.button("🚀 Gerar Documento .DOCX", type="primary", disabled=(len(st.session_state.etapas_concluidas) < 7)):
+        
+        # Garante que os valores de data estejam atualizados no session_state antes de usar os dados
+        update_laudo_date()
+        update_vencimento_date()
         
         dados = {k: v for k, v in st.session_state.items() if not k.startswith("editing_") and k not in ["process_to_load", "etapas_concluidas"]}
         dados['AUTORES'] = dados.get('autor', '').split('\n')
@@ -451,11 +505,13 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
                 quesito_images_list=quesito_images_list
             )
             
-            st.session_state.etapas_concluidas.add(8)
-            save_current_state()
+            st.session_state.etapas_concluidas.add(8) # Marca a etapa 8 como concluída
             
-            st.success(f"Laudo **{st.session_state.numero_processo}** gerado com sucesso!")
+            # Salva o estado atualizado do processo (garante que dados de conclusão estejam no JSON)
+            if save_process_data(st.session_state.numero_processo, st.session_state):
+                 st.success(f"Laudo **{st.session_state.numero_processo}** gerado com sucesso!")
             
+            # Adiciona botão de download
             with open(caminho_saida, "rb") as file:
                 st.download_button(
                     label="⬇️ Baixar Laudo .DOCX",
