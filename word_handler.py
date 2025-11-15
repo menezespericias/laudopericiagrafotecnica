@@ -210,20 +210,23 @@ def carregar_indice_processos():
     ]
 
     try:
-        # Autenticação com credenciais do secrets.toml
+        # Garante que o segredo seja interpretado como dicionário
         credentials = Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"],
+            dict(st.secrets["gcp_service_account"]),
             scopes=SCOPES
         )
         client = gspread.authorize(credentials)
 
-        # Abertura da planilha via URL
+        # Abre a planilha via URL
         spreadsheet = client.open_by_url(st.secrets["spreadsheet_url"])
 
-        # Acesso à aba chamada "Índice" (ou ajuste conforme necessário)
-        worksheet = spreadsheet.worksheet("Índice")
-        dados = worksheet.get_all_records()
+        # Tenta acessar a aba "Índice"; se não existir, usa a primeira aba
+        try:
+            worksheet = spreadsheet.worksheet("Índice")
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = spreadsheet.sheet1
 
+        dados = worksheet.get_all_records()
         return dados
 
     except Exception as e:
