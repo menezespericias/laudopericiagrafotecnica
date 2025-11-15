@@ -24,15 +24,12 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 def init_session_state():
     """Inicializa as chaves do session_state que não existem."""
-    # Garante que as variáveis de estado existam para evitar erros de KeyError
     if 'editing_etapa_1' not in st.session_state:
-        st.session_state.editing_etapa_1 = True # Começa com a primeira etapa aberta
+        st.session_state.editing_etapa_1 = True 
 
     # CORREÇÃO FINAL para o AttributeError: Garante que etapas_concluidas seja sempre um SET.
-    # 1. Se a chave não existe, inicializa como SET.
     if 'etapas_concluidas' not in st.session_state:
         st.session_state.etapas_concluidas = set()
-    # 2. Se a chave existe, mas foi carregada como lista (do JSON), converte para SET.
     elif isinstance(st.session_state.etapas_concluidas, list):
         st.session_state.etapas_concluidas = set(st.session_state.etapas_concluidas)
 
@@ -44,7 +41,7 @@ def init_session_state():
     if 'reu' not in st.session_state:
         st.session_state.reu = ""
     
-    # Campos das demais etapas (adicionar conforme o laudo)
+    # Campos das demais etapas
     if 'quesitos_autor' not in st.session_state:
         st.session_state.quesitos_autor = []
     if 'quesitos_reu' not in st.session_state:
@@ -66,7 +63,11 @@ def init_session_state():
     ]
     for campo in campos_base:
         if campo not in st.session_state:
-            st.session_state[campo] = ""
+            # Inicializa datas como string vazia (será tratada abaixo)
+            if 'DATA_' in campo or 'VENCIMENTO' in campo:
+                st.session_state[campo] = date.today().strftime("%d/%m/%Y")
+            else:
+                st.session_state[campo] = ""
 
 def save_current_state():
     """Chama a função de salvar do data_handler e atualiza o estado."""
@@ -77,13 +78,13 @@ def save_current_state():
             # 1. Salva os dados no JSON
             save_process_data(process_id, st.session_state)
             
-            # 2. ATUALIZAÇÃO CRÍTICA: Atualiza o status e a data no banco de dados SQLite
+            # 2. ATUALIZA o status no banco de dados SQLite
             NOVO_STATUS = "Em andamento"
             atualizar_status(process_id, NOVO_STATUS)
             
             st.session_state.status_db = NOVO_STATUS 
             
-            st.session_state.etapas_concluidas.add(1) # Marca a etapa 1 como concluída
+            st.session_state.etapas_concluidas.add(1)
             st.toast(f"✅ Dados do Processo {process_id} salvos e status atualizado para '{NOVO_STATUS}'.")
             return True
             
@@ -104,19 +105,17 @@ def add_list_item(key: str, item_data: dict, list_key: str = None):
     if final_key not in st.session_state:
         st.session_state[final_key] = []
     
-    # Adiciona um ID para o item
     item_data['id'] = len(st.session_state[final_key]) + 1
     st.session_state[final_key].append(item_data)
-    st.rerun() # Recarrega a tela para mostrar a lista atualizada
+    st.rerun()
 
 def remove_list_item(list_key: str, item_id: int):
     """Remove um item da lista em st.session_state pelo ID."""
     if list_key in st.session_state:
         st.session_state[list_key] = [item for item in st.session_state[list_key] if item.get('id') != item_id]
-        # Re-indexa os IDs após a remoção
         for i, item in enumerate(st.session_state[list_key]):
             item['id'] = i + 1
-        st.rerun() # Recarrega a tela para mostrar a lista atualizada
+        st.rerun()
 
 
 # --- Carregamento automático do processo selecionado ---
@@ -124,18 +123,15 @@ if "process_to_load" in st.session_state and st.session_state["process_to_load"]
     process_id = st.session_state["process_to_load"]
     
     try:
-        # Usa a função do data_handler para carregar
         dados_carregados = load_process_data(process_id)
         
-        # Carrega os dados para o session_state, sobrescrevendo valores existentes
         for key, value in dados_carregados.items():
             st.session_state[key] = value
 
         st.success(f"📂 Processo **{process_id}** carregado com sucesso!")
         
-        # Limpa a flag de carregamento após o sucesso
         st.session_state.process_to_load = None 
-        st.session_state.editing_etapa_1 = True # Abre a primeira etapa para começar a edição
+        st.session_state.editing_etapa_1 = True
         
     except FileNotFoundError:
         st.error(f"❌ Arquivo JSON para o processo {process_id} não encontrado. Por favor, volte e tente recriá-lo.")
@@ -145,8 +141,6 @@ if "process_to_load" in st.session_state and st.session_state["process_to_load"]
         st.error(f"❌ Erro ao carregar o arquivo JSON do processo {process_id}: {e}")
         st.session_state.process_to_load = None
         
-    # Nenhuma chamada a st.rerun() aqui, o script continua com os dados carregados
-
 
 # --- Inicialização do Estado de Sessão ---
 init_session_state()
@@ -155,11 +149,10 @@ init_session_state()
 if "numero_processo" not in st.session_state or not st.session_state.numero_processo:
     st.warning("Nenhum processo selecionado ou carregado. Por favor, volte à página inicial para selecionar ou criar um processo.")
     
-    # Adiciona o botão de voltar para facilitar a navegação
     if st.button("🏠 Voltar para Home"):
         st.switch_page("home.py")
         
-    st.stop() # Interrompe o script se não houver processo carregado
+    st.stop()
 
 # --- TÍTULO PRINCIPAL ---
 st.title(f"👨‍🔬 Laudo Pericial: {st.session_state.numero_processo}")
@@ -189,34 +182,38 @@ with st.expander(f"1. Dados Básicos do Processo - {st.session_state.numero_proc
         data_laudo_val = st.session_state.get("DATA_LAUDO")
         data_obj = date.today() # Define um valor padrão seguro
         
-        # Lógica para converter o valor do session_state para um objeto date seguro (CORREÇÃO DO TypeError)
+        # 1. Tenta converter a string de data (do JSON) para objeto date.
         if isinstance(data_laudo_val, str):
             try:
                 data_obj = datetime.strptime(data_laudo_val, "%d/%m/%Y").date()
             except:
-                pass
+                data_obj = date.today() # Usa a data atual se a string for inválida
+        # 2. Se for uma lista (o problema recorrente), usa a data atual
+        elif isinstance(data_laudo_val, (list, tuple)):
+            data_obj = date.today()
+        # 3. Se for um objeto date/datetime válido (após primeira edição), usa-o
         elif isinstance(data_laudo_val, date):
-            data_obj = data_laudo_val
-        # Se for uma lista (o que causava o TypeError) ou outro tipo inesperado, usa a data atual e reseta
-        elif isinstance(data_laudo_val, list):
-             st.session_state.DATA_LAUDO = date.today().strftime("%d/%m/%Y")
-             data_obj = date.today()
+             data_obj = data_laudo_val
             
-        st.session_state.DATA_LAUDO = st.date_input("Data da Conclusão do Laudo", value=data_obj, key="input_data_laudo")
+        # 4. Renderiza o widget e captura o objeto date retornado
+        data_input_result = st.date_input("Data da Conclusão do Laudo", value=data_obj, key="input_data_laudo")
+        
+        # CORREÇÃO FINAL: Converte o objeto date retornado pelo widget para a string esperada para o JSON
+        st.session_state.DATA_LAUDO = data_input_result.strftime("%d/%m/%Y")
         
         st.session_state.PERITO = st.text_input("Nome do Perito", value=st.session_state.get("PERITO", ""))
         st.session_state.ESPECIALIZACAO = st.text_input("Especialização (Ex: Grafotécnico)", value=st.session_state.get("ESPECIALIZACAO", ""))
         
     if st.button("💾 Salvar Dados Básicos (Etapa 1)"):
         if save_current_state():
-            st.session_state.editing_etapa_1 = False # Fecha a expansão após salvar
+            st.session_state.editing_etapa_1 = False
             st.rerun()
 
 st.markdown("---")
 
 # --- ETAPA 2: PEÇAS E QUESITOS ---
 with st.expander("2. Peças e Quesitos"):
-    
+    # ... (O restante do código da Etapa 2 é mantido)
     # Formulário para adicionar Quesitos do Autor
     with st.form("form_quesitos_autor"):
         st.subheader("Quesitos do Autor")
@@ -227,7 +224,7 @@ with st.expander("2. Peças e Quesitos"):
             if novo_quesito_autor:
                 item_data = {
                     "texto": novo_quesito_autor,
-                    "imagem_obj": imagem_quesito_autor # Salva o objeto uploaded_file
+                    "imagem_obj": imagem_quesito_autor
                 }
                 add_list_item("quesitos_autor", item_data)
             else:
@@ -239,8 +236,6 @@ with st.expander("2. Peças e Quesitos"):
         for q in st.session_state.quesitos_autor:
             col_q1, col_q2 = st.columns([4, 1])
             col_q1.write(f"**Quesito {q['id']}:** {q['texto']}")
-            # Nota: O objeto imagem_obj só está presente durante a sessão (não salvo no JSON)
-            # Para reexibir após o load, precisaria re-carregar a imagem de um local persistente
             if q.get('imagem_obj'):
                 col_q1.image(q['imagem_obj'], caption=f"Imagem do Quesito {q['id']}", width=200)
             if col_q2.button("🗑️ Remover", key=f"del_quesito_autor_{q['id']}"):
@@ -258,7 +253,7 @@ with st.expander("2. Peças e Quesitos"):
             if novo_quesito_reu:
                 item_data = {
                     "texto": novo_quesito_reu,
-                    "imagem_obj": imagem_quesito_reu # Salva o objeto uploaded_file
+                    "imagem_obj": imagem_quesito_reu
                 }
                 add_list_item("quesitos_reu", item_data)
             else:
@@ -324,7 +319,6 @@ st.markdown("---")
 
 # --- ETAPA 4: CONSIDERAÇÕES TÉCNICAS E METODOLOGIA ---
 with st.expander("4. Considerações Técnicas, Metodologia e Corpus de Confronto"):
-    # Texto longo sobre a metodologia
     st.session_state.METODOLOGIA_TEXTO = st.text_area("Texto Detalhado sobre a Metodologia e Técnicas Aplicadas", 
                                                       value=st.session_state.get("METODOLOGIA_TEXTO", ""), height=300)
     
@@ -336,7 +330,6 @@ st.markdown("---")
 
 # --- ETAPA 5: ANÁLISE COMPARATIVA ---
 with st.expander("5. Análise Comparativa e Resultados (Desenvolvimento do Laudo)"):
-    # Aqui entraria a análise detalhada de características gráficas (calibre, ataque, traçado, etc.)
     st.session_state.ANALISE_TEXTO = st.text_area("Descrição Detalhada da Análise e dos Elementos Gráficos Confrontados", 
                                                   value=st.session_state.get("ANALISE_TEXTO", ""), height=500)
     st.session_state.etapas_concluidas.add(5)
@@ -391,22 +384,27 @@ with st.expander("7. Conclusão e Informações Finais"):
     with col_h2:
         # Pega a data de vencimento do estado.
         data_vencimento_val = st.session_state.get("HONORARIOS_VENCIMENTO")
-        data_obj_v = date.today() # Define um valor padrão seguro
+        data_obj_v = date.today()
         
-        # Lógica para converter o valor do session_state para um objeto date seguro (CORREÇÃO DO TypeError)
+        # 1. Tenta converter a string de data (do JSON) para objeto date.
         if isinstance(data_vencimento_val, str):
             try:
                 data_obj_v = datetime.strptime(data_vencimento_val, "%d/%m/%Y").date()
             except:
-                pass
+                data_obj_v = date.today()
+        # 2. Se for uma lista (o problema recorrente), usa a data atual
+        elif isinstance(data_vencimento_val, (list, tuple)):
+            data_obj_v = date.today()
+        # 3. Se for um objeto date/datetime válido (após primeira edição), usa-o
         elif isinstance(data_vencimento_val, date):
-            data_obj_v = data_vencimento_val
-        elif isinstance(data_vencimento_val, list):
-             st.session_state.HONORARIOS_VENCIMENTO = date.today().strftime("%d/%m/%Y")
-             data_obj_v = date.today()
+             data_obj_v = data_vencimento_val
             
-        st.session_state.HONORARIOS_VENCIMENTO = st.date_input("Data de Vencimento do Pagamento", 
+        # 4. Renderiza o widget e captura o objeto date retornado
+        data_vencimento_result = st.date_input("Data de Vencimento do Pagamento", 
                                                                value=data_obj_v, key="input_data_vencimento")
+        
+        # CORREÇÃO FINAL: Converte o objeto date retornado pelo widget para a string esperada para o JSON
+        st.session_state.HONORARIOS_VENCIMENTO = data_vencimento_result.strftime("%d/%m/%Y")
 
     st.session_state.etapas_concluidas.add(7)
 
@@ -424,19 +422,13 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
 
     if st.button("🚀 Gerar Documento .DOCX", type="primary", disabled=(len(st.session_state.etapas_concluidas) < 7)):
         
-        # 1. Reúne todos os dados do st.session_state em um dicionário de placeholders
         dados = {k: v for k, v in st.session_state.items() if not k.startswith("editing_") and k not in ["process_to_load", "etapas_concluidas"]}
-
-        # Trata as listas de autores e réus (se houver quebra de linha)
         dados['AUTORES'] = dados.get('autor', '').split('\n')
         dados['REUS'] = dados.get('reu', '').split('\n')
         
-        # Cria a lista de imagens de quesitos a ser passada para word_handler
         quesito_images_list = []
         
-        # Quesitos Autor
         for q in st.session_state.quesitos_autor:
-            # Verifica se o 'imagem_obj' foi carregado (somente em sessão atual)
             if q.get("imagem_obj"):
                 quesito_images_list.append({
                     "id": f"Autor {q['id']}",
@@ -444,9 +436,7 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
                     "description": f"Quesito {q['id']} do Autor"
                 })
         
-        # Quesitos Réu
         for q in st.session_state.quesitos_reu:
-            # Verifica se o 'imagem_obj' foi carregado (somente em sessão atual)
             if q.get("imagem_obj"):
                 quesito_images_list.append({
                     "id": f"Réu {q['id']}",
@@ -455,7 +445,6 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
                 })
 
         try:
-            # Chama a função principal de geração do word_handler
             gerar_laudo(
                 caminho_modelo=caminho_modelo,
                 caminho_saida=caminho_saida,
@@ -465,14 +454,11 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
                 quesito_images_list=quesito_images_list
             )
             
-            st.session_state.etapas_concluidas.add(8) # Marca a etapa 8 como concluída
-            
-            # Salva o estado atualizado do processo (garante que dados de conclusão estejam no JSON)
+            st.session_state.etapas_concluidas.add(8)
             save_current_state()
             
             st.success(f"Laudo **{st.session_state.numero_processo}** gerado com sucesso!")
             
-            # Adiciona botão de download
             with open(caminho_saida, "rb") as file:
                 st.download_button(
                     label="⬇️ Baixar Laudo .DOCX",
