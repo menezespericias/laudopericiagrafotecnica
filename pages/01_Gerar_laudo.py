@@ -32,7 +32,6 @@ def init_session_state():
     # 1. Se a chave não existe, inicializa como SET.
     if 'etapas_concluidas' not in st.session_state:
         st.session_state.etapas_concluidas = set()
-    
     # 2. Se a chave existe, mas foi carregada como lista (do JSON), converte para SET.
     elif isinstance(st.session_state.etapas_concluidas, list):
         st.session_state.etapas_concluidas = set(st.session_state.etapas_concluidas)
@@ -79,14 +78,9 @@ def save_current_state():
             save_process_data(process_id, st.session_state)
             
             # 2. ATUALIZAÇÃO CRÍTICA: Atualiza o status e a data no banco de dados SQLite
-            # Se o usuário está editando, o status deve ser "Em andamento"
             NOVO_STATUS = "Em andamento"
-            
-            # A função atualizar_status já atualiza a coluna 'atualizado_em' automaticamente.
-            # Certifique-se que db_handler.py tenha esta função.
             atualizar_status(process_id, NOVO_STATUS)
             
-            # Atualiza o session state para refletir a mudança no DB
             st.session_state.status_db = NOVO_STATUS 
             
             st.session_state.etapas_concluidas.add(1) # Marca a etapa 1 como concluída
@@ -98,7 +92,7 @@ def save_current_state():
             return False
         except Exception as e:
             st.error(f"Erro inesperado ao salvar: {e}")
-            st.warning("Pode haver um problema de sincronização entre o arquivo JSON e o Banco de Dados. Verifique o db_handler.")
+            st.warning("Pode haver um problema de sincronização entre o arquivo JSON e o Banco de Dados.")
             return False
     else:
         st.error("Erro: Número do Processo não definido para salvar.")
@@ -191,17 +185,22 @@ with st.expander(f"1. Dados Básicos do Processo - {st.session_state.numero_proc
         st.session_state.reu = st.text_area("Réu(s) (Um por linha)", value=st.session_state.get("reu", ""))
 
     with col3:
-        # Lógica para tratar a data corretamente
+        # Pega a data de conclusão do laudo do estado.
         data_laudo_val = st.session_state.get("DATA_LAUDO")
+        data_obj = date.today() # Define um valor padrão seguro
+        
+        # Lógica para converter o valor do session_state para um objeto date seguro (CORREÇÃO DO TypeError)
         if isinstance(data_laudo_val, str):
             try:
                 data_obj = datetime.strptime(data_laudo_val, "%d/%m/%Y").date()
             except:
-                data_obj = date.today()
+                pass
         elif isinstance(data_laudo_val, date):
             data_obj = data_laudo_val
-        else:
-            data_obj = date.today()
+        # Se for uma lista (o que causava o TypeError) ou outro tipo inesperado, usa a data atual e reseta
+        elif isinstance(data_laudo_val, list):
+             st.session_state.DATA_LAUDO = date.today().strftime("%d/%m/%Y")
+             data_obj = date.today()
             
         st.session_state.DATA_LAUDO = st.date_input("Data da Conclusão do Laudo", value=data_obj, key="input_data_laudo")
         
@@ -241,6 +240,7 @@ with st.expander("2. Peças e Quesitos"):
             col_q1, col_q2 = st.columns([4, 1])
             col_q1.write(f"**Quesito {q['id']}:** {q['texto']}")
             # Nota: O objeto imagem_obj só está presente durante a sessão (não salvo no JSON)
+            # Para reexibir após o load, precisaria re-carregar a imagem de um local persistente
             if q.get('imagem_obj'):
                 col_q1.image(q['imagem_obj'], caption=f"Imagem do Quesito {q['id']}", width=200)
             if col_q2.button("🗑️ Remover", key=f"del_quesito_autor_{q['id']}"):
@@ -389,17 +389,21 @@ with st.expander("7. Conclusão e Informações Finais"):
         st.session_state.HONORARIOS_VALOR = st.text_input("Valor dos Honorários (R$)", 
                                                           value=st.session_state.get("HONORARIOS_VALOR", ""))
     with col_h2:
-        # Lógica para tratar a data de vencimento corretamente
+        # Pega a data de vencimento do estado.
         data_vencimento_val = st.session_state.get("HONORARIOS_VENCIMENTO")
+        data_obj_v = date.today() # Define um valor padrão seguro
+        
+        # Lógica para converter o valor do session_state para um objeto date seguro (CORREÇÃO DO TypeError)
         if isinstance(data_vencimento_val, str):
             try:
                 data_obj_v = datetime.strptime(data_vencimento_val, "%d/%m/%Y").date()
             except:
-                data_obj_v = date.today()
+                pass
         elif isinstance(data_vencimento_val, date):
             data_obj_v = data_vencimento_val
-        else:
-            data_obj_v = date.today()
+        elif isinstance(data_vencimento_val, list):
+             st.session_state.HONORARIOS_VENCIMENTO = date.today().strftime("%d/%m/%Y")
+             data_obj_v = date.today()
             
         st.session_state.HONORARIOS_VENCIMENTO = st.date_input("Data de Vencimento do Pagamento", 
                                                                value=data_obj_v, key="input_data_vencimento")
@@ -432,6 +436,7 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
         
         # Quesitos Autor
         for q in st.session_state.quesitos_autor:
+            # Verifica se o 'imagem_obj' foi carregado (somente em sessão atual)
             if q.get("imagem_obj"):
                 quesito_images_list.append({
                     "id": f"Autor {q['id']}",
@@ -441,6 +446,7 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
         
         # Quesitos Réu
         for q in st.session_state.quesitos_reu:
+            # Verifica se o 'imagem_obj' foi carregado (somente em sessão atual)
             if q.get("imagem_obj"):
                 quesito_images_list.append({
                     "id": f"Réu {q['id']}",
@@ -462,7 +468,7 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
             st.session_state.etapas_concluidas.add(8) # Marca a etapa 8 como concluída
             
             # Salva o estado atualizado do processo (garante que dados de conclusão estejam no JSON)
-            save_current_state() # Usa a função de salvamento que também atualiza o DB
+            save_current_state()
             
             st.success(f"Laudo **{st.session_state.numero_processo}** gerado com sucesso!")
             
