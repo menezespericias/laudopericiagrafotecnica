@@ -50,24 +50,26 @@ def update_vencimento_date():
     update_session_date_format("HONORARIOS_VENCIMENTO", "input_data_vencimento")
 
 
-# --- Funções Auxiliares (Defesa na Leitura - Sanador de Estado) ---
+# --- Funções Auxiliares (Defesa na Leitura e Sanitização) ---
 
-def get_date_object_from_state(key: str) -> date:
+def sanitize_date_state(key: str):
     """
-    FUNÇÃO DE DEFESA AGRESSIVA: Extrai e valida o valor de data do session_state, 
-    forçando-o a ser um único objeto date.
+    Sanitiza o valor da data no session_state. Roda após o carregamento do JSON.
+    Força o valor a ser uma STRING limpa 'DD/MM/YYYY' ou a data de hoje.
     """
     data_val = st.session_state.get(key)
     
-    # 1. TRATAMENTO DE LISTA (CAUSA PRINCIPAL DO TypeError)
-    if isinstance(data_val, (list, tuple)):
-        if data_val:
-            # Converte o primeiro item da lista em string para processamento
-            data_val = str(data_val[0])
-        else:
-            return date.today() # Lista vazia, retorna hoje
-
-    # 2. TRATAMENTO DE STRING
+    # 1. TRATAMENTO DE LISTA (CAUSA PRINCIPAL DA CORRUPÇÃO)
+    if isinstance(data_val, (list, tuple)) and data_val:
+        # Pega o primeiro item da lista para tentar a conversão
+        data_val = data_val[0]
+        
+    # 2. Tenta converter objeto date para string (se já foi convertido por alguma lógica)
+    if isinstance(data_val, date):
+        st.session_state[key] = data_val.strftime("%d/%m/%Y")
+        return
+    
+    # 3. TRATAMENTO DE STRING
     if isinstance(data_val, str) and data_val:
         data_str = data_val.strip()
         
@@ -76,23 +78,36 @@ def get_date_object_from_state(key: str) -> date:
         
         for fmt in formatos:
             try:
-                # Tenta converter a string para objeto date
-                return datetime.strptime(data_str, fmt).date()
+                # Tenta converter a string para objeto date e volta para string, garantindo formato limpo
+                obj = datetime.strptime(data_str, fmt).date()
+                st.session_state[key] = obj.strftime("%d/%m/%Y")
+                return
             except:
-                continue # Tenta o próximo formato
-        
-        # Se todos os formatos falharem
-        try:
-            # Tenta um parsing genérico (último recurso)
-            return datetime.strptime(data_str, "%d/%m/%Y").date()
-        except:
-             pass
+                continue 
 
-    # 3. TRATAMENTO DE OBJETO DATE JÁ EXISTENTE
-    elif isinstance(data_val, date):
+    # 4. Fallback: Se for None, vazio ou falha, define a data atual como string e salva.
+    st.session_state[key] = date.today().strftime("%d/%m/%Y")
+
+
+def get_date_object_from_state(key: str) -> date:
+    """
+    Roda após a sanitização: Extrai o valor do state e garante que seja um objeto date
+    para ser usado no 'value' do st.date_input.
+    """
+    data_val = st.session_state.get(key)
+    
+    # Prioriza o objeto date, se já existir
+    if isinstance(data_val, date):
         return data_val
 
-    # 4. Fallback (data atual)
+    # Assume que a sanitização deixou uma string limpa
+    if isinstance(data_val, str) and data_val:
+        try:
+            return datetime.strptime(data_val, "%d/%m/%Y").date()
+        except:
+            pass
+            
+    # Fallback
     return date.today()
 
 
@@ -106,12 +121,9 @@ def init_session_state():
         st.session_state.etapas_concluidas = set()
     elif not isinstance(st.session_state.etapas_concluidas, set):
         try:
-            # Coerge para set se for lista ou outro iterável carregado do JSON
             st.session_state.etapas_concluidas = set(st.session_state.etapas_concluidas)
         except:
-            st.session_state.etapas_concluidas = set() # Se falhar, inicializa vazio
-
-    # ... (outras inicializações) ...
+            st.session_state.etapas_concluidas = set()
 
     # Outros campos do laudo
     campos_base = [
@@ -138,20 +150,19 @@ def save_current_state():
         process_id = st.session_state.numero_processo
         
         try:
-            # Garante que as datas nos inputs foram salvas no session_state como strings antes de salvar o JSON
+            # 1. Garante que as datas nos inputs foram salvas no session_state como strings antes de salvar o JSON
             update_laudo_date()
             update_vencimento_date()
             
-            # 1. Salva os dados no JSON
+            # 2. Salva os dados no JSON
             save_process_data(process_id, st.session_state)
             
-            # 2. ATUALIZA o status no banco de dados SQLite
+            # 3. ATUALIZA o status no banco de dados SQLite
             NOVO_STATUS = "Em andamento"
             atualizar_status(process_id, NOVO_STATUS)
             
             st.session_state.status_db = NOVO_STATUS 
             
-            # Garante que a etapa 1 está marcada, usando o tipo set
             if isinstance(st.session_state.etapas_concluidas, set):
                 st.session_state.etapas_concluidas.add(1)
             
@@ -198,6 +209,10 @@ if "process_to_load" in st.session_state and st.session_state["process_to_load"]
         # Carrega os dados para o session_state
         for key, value in dados_carregados.items():
             st.session_state[key] = value
+
+        # PASSO CRÍTICO: SANITIZAÇÃO DE DATA APÓS CARREGAMENTO DO JSON
+        sanitize_date_state("DATA_LAUDO")
+        sanitize_date_state("HONORARIOS_VENCIMENTO")
 
         st.success(f"📂 Processo **{process_id}** carregado com sucesso!")
         
@@ -520,6 +535,7 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
                 st.session_state.etapas_concluidas.add(8) # Marca a etapa 8 como concluída
             
             # Salva o estado atualizado do processo (garante que dados de conclusão estejam no JSON)
+            # A função save_current_state já faz isso e chama save_process_data.
             if save_current_state():
                  st.success(f"Laudo **{st.session_state.numero_processo}** gerado com sucesso!")
             
