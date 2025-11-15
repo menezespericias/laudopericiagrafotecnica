@@ -3,4 +3,4 @@ python-docx
 num2words
 gspread
 pandas
-gspread-dataframe
+gspread-dataframe==3.3.0  # <--- Use esta versão, com hífen!
