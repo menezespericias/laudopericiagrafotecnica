@@ -43,20 +43,25 @@ def substituir_em_tabela(tabela, dados: dict):
             for paragrafo in cell.paragraphs:
                 substituir_em_paragrafo(paragrafo, dados)
 
-def inserir_imagens_em_secao(doc: Document, titulo: str, adendos: List[Dict[str, Any]], prefixo: str):
-    """Insere o título da seção e as imagens dos adendos."""
+# --- CORREÇÃO: Função de inserção de imagens generalizada (Anexos, Adendos, Quesitos) ---
+def inserir_imagens_em_secao(doc: Document, titulo: str, imagens_data: List[Dict[str, Any]], prefixo: str):
+    """Insere o título da seção e as imagens (Anexos ou Adendos ou Quesitos)."""
     
-    # Filtra adendos que possuem imagem_obj (BytesIO) e possuem dados
-    imagens_para_inserir = [a for a in adendos if a.get("imagem_obj") and isinstance(a.get("imagem_obj"), BytesIO) and a.get("imagem_obj").getbuffer().nbytes > 0]
+    # Filtra dados que possuem o objeto de imagem em BytesIO e com tamanho maior que zero
+    imagens_para_inserir = [
+        a for a in imagens_data 
+        if a.get("file_obj") and isinstance(a.get("file_obj"), BytesIO) and a.get("file_obj").getbuffer().nbytes > 0
+    ]
     
     if not imagens_para_inserir:
         return
         
     doc.add_heading(titulo, level=2)
     
-    for i, adendo in enumerate(imagens_para_inserir):
-        legenda = adendo.get("legenda", f"{prefixo} {i+1}")
-        file_obj_buffer = adendo.get("imagem_obj") # É um BytesIO
+    for i, img_data in enumerate(imagens_para_inserir):
+        # Tenta usar 'legenda', 'description' ou um padrão
+        legenda = img_data.get("legenda", img_data.get("description", f"{prefixo} {i+1}"))
+        file_obj_buffer = img_data.get("file_obj") # É um BytesIO
         
         try:
             # Garante que o buffer esteja no início antes de ler
@@ -146,19 +151,27 @@ def gerar_bloco_conclusao_dinamico(dados: dict) -> str:
 
 def gerar_bloco_respostas_quesitos(dados: dict, parte: str) -> str:
     """Gera o bloco de respostas aos quesitos de uma parte (Autor ou Réu)."""
-    respostas = dados.get('RESPOSTAS_QUESITOS_LIST', [])
+    # A lista de quesitos está separada em 'quesitos_autor' e 'quesitos_reu' no session_state original.
+    # Assumindo que dados['RESPOSTAS_QUESITOS_LIST'] não é usado, vamos reconstruir a lista a partir do dict de entrada
+    # que deve conter as listas separadas.
     
+    # Determina qual lista usar com base na 'parte'
+    if parte.lower() == 'autor':
+        quesitos_list = dados.get('QUESITOS_AUTOR', [])
+    elif parte.lower() == 'réu':
+        quesitos_list = dados.get('QUESITOS_REU', [])
+    else:
+        return ""
+
     bloco_texto = []
     
-    # Filtra as respostas para a parte específica
-    respostas_filtradas = [r for r in respostas if r['parte'] == parte]
-    
-    if not respostas_filtradas:
+    if not quesitos_list:
         return f"Não foram apresentados quesitos pela parte {parte}."
 
-    for r in respostas_filtradas:
+    for q in quesitos_list:
         # Formato: X.1. Quesito: [Texto do Quesito] Resposta: [Texto da Resposta]
-        bloco_texto.append(f"**Quesito {r['id']}:** {r['quesito']}\n**Resposta:** {r['resposta']}\n")
+        # Aqui, estamos usando o campo 'resposta' do quesito (preenchido no Streamlit)
+        bloco_texto.append(f"**Quesito {q.get('id')}:** {q.get('quesito', '')}\n**Resposta:** {q.get('resposta', 'Resposta não informada')}\n")
         
     # Converte a lista de strings formatadas em uma única string com quebras de linha
     return "\n".join(bloco_texto)
@@ -178,27 +191,29 @@ def gerar_bloco_documentos_questionados(doc: Document, dados: dict):
         if i < len(docs):
             d = docs[i]
             # O texto completo que substitui o bloco da linha Documento X:
-            texto_doc = f"{d['tipo']}, nº {d['numero']}, datado de {d['data']}, fls. {d['fls']}."
+            texto_doc = f"{d.get('tipo', 'N/A')}, nº {d.get('numero', 'N/A')}, datado de {d.get('data', 'N/A')}, fls. {d.get('fls', 'N/A')}."
         
         # Procura e substitui todos os placeholders para este documento
         for paragrafo in doc.paragraphs:
             if placeholder_tipo in paragrafo.text or placeholder_num in paragrafo.text:
                 if texto_doc:
                     # Tenta substituir o bloco completo (Documento X: [TIPO_DOCUMENTO_X]...)
-                    padrao_completo = re.compile(r"Documento\s+" + str(i+1) + r":\s*" + re.escape(placeholder_tipo) + r".*")
+                    # Padrao mais genérico para evitar erro de regex
+                    padrao_completo = re.compile(r"Documento\s+" + str(i+1) + r":\s*.*", re.IGNORECASE)
                     
                     if padrao_completo.search(paragrafo.text):
                         # Se encontrar o padrão, substitui a linha inteira
                         paragrafo.text = re.sub(padrao_completo, f"Documento {i+1}: {texto_doc}", paragrafo.text)
                     else:
                         # Se não encontrar o padrão completo, faz a substituição individual (mais robusto)
-                        paragrafo.text = paragrafo.text.replace(placeholder_tipo, d['tipo'])
-                        paragrafo.text = paragrafo.text.replace(placeholder_num, d['numero'])
-                        paragrafo.text = paragrafo.text.replace(placeholder_data, d['data'])
-                        paragrafo.text = paragrafo.text.replace(placeholder_fls, d['fls'])
+                        if i < len(docs):
+                            paragrafo.text = paragrafo.text.replace(placeholder_tipo, d.get('tipo', ''))
+                            paragrafo.text = paragrafo.text.replace(placeholder_num, d.get('numero', ''))
+                            paragrafo.text = paragrafo.text.replace(placeholder_data, d.get('data', ''))
+                            paragrafo.text = paragrafo.text.replace(placeholder_fls, d.get('fls', ''))
                 else:
                     # Remove a linha se não houver documento
-                    padrao_completo = re.compile(r"Documento\s+" + str(i+1) + r":\s*" + re.escape(placeholder_tipo) + r".*")
+                    padrao_completo = re.compile(r"Documento\s+" + str(i+1) + r":\s*.*", re.IGNORECASE)
                     if padrao_completo.search(paragrafo.text):
                         paragrafo.text = ""
                     else:
@@ -230,21 +245,26 @@ def gerar_bloco_padroes_encontrados(doc: Document, dados: dict):
         p_rem.text = ""
 
     for i, p in enumerate(padroes):
-        texto_padrao = f"Documento {i+1}: {p['tipo']} – Fls. {p['fls']}, datado de {p['data']}."
+        texto_padrao = f"Documento {i+1}: {p.get('tipo', 'N/A')} – Fls. {p.get('fls', 'N/A')}, datado de {p.get('data', 'N/A')}."
         
         if i == 0:
             paragrafo_encontrado.text = texto_padrao
         else:
-            paragrafo_encontrado.insert_paragraph_before(texto_padrao)
+            # Insere o novo parágrafo APÓS o Documento 1 (ou o último inserido)
+            paragrafo_encontrado.insert_paragraph_after(texto_padrao)
+            # Reatribui para que o próximo insert seja feito após ele
+            paragrafo_encontrado = paragrafo_encontrado.part.paragraphs[-1]
 
 
-# --- FUNÇÃO PRINCIPAL DE GERAÇÃO ---
+# --- FUNÇÃO PRINCIPAL DE GERAÇÃO (CORRIGIDA) ---
 
 def gerar_laudo(
     caminho_modelo: str, 
     caminho_saida: str, 
     dados: dict, 
-    adendos: List[Dict[str, Any]] 
+    anexos: List[Dict[str, Any]], # NOVO: Anexos (Geral) 
+    adendos: List[Dict[str, Any]],
+    quesito_images_list: List[Dict[str, Any]] # NOVO PARÂMETRO
 ):
     
     doc = Document(caminho_modelo)
@@ -274,7 +294,7 @@ def gerar_laudo(
     # Bloco de conclusão dinâmico (tratado como substituição de texto simples)
     dados['BLOCO_CONCLUSAO_DINAMICO'] = gerar_bloco_conclusao_dinamico(dados)
     
-    # Bloco de respostas aos quesitos
+    # Bloco de respostas aos quesitos. Usa as listas QUESITOS_AUTOR e QUESITOS_REU que devem vir no dict de dados
     dados['BLOCO_QUESITOS_AUTOR'] = gerar_bloco_respostas_quesitos(dados, 'Autor')
     dados['BLOCO_QUESITOS_REU'] = gerar_bloco_respostas_quesitos(dados, 'Réu')
     
@@ -283,9 +303,17 @@ def gerar_laudo(
     for paragrafo in doc.paragraphs:
         
         # 2.1. Substituição do cabeçalho (Resumo)
-        if "[NUMERO DO PROCESSO]Autor: [nome do autor]Réu: [nome do réu]" in paragrafo.text:
-            texto_resumo = f"{dados.get('numero_processo', '')} Autor: {dados.get('PRIMEIRO_AUTOR', '')} Réu: {dados.get('NOME COMPLETO DO RÉU', '')}"
-            paragrafo.text = paragrafo.text.replace(f"Processo: [NUMERO DO PROCESSO]Autor: [nome do autor]Réu: [nome do réu]", f"Processo: {texto_resumo}")
+        # O padrão no arquivo original é: "[NUMERO DO PROCESSO]Autor: [nome do autor]Réu: [nome do réu]"
+        # Modificado para ser mais genérico
+        header_ref_text = f"Processo: {dados.get('numero_processo', '')}"
+        
+        # O trecho abaixo foi simplificado no código original para apenas:
+        # if "[NUMERO DO PROCESSO]Autor: [nome do autor]Réu: [nome do réu]" in paragrafo.text:
+        # A forma mais robusta é usar a função de substituição geral, mas se for um cabeçalho único:
+        if "Processo: [NUMERO DO PROCESSO]Autor: [nome do autor]Réu: [nome do réu]" in paragrafo.text:
+             texto_resumo = f"{dados.get('numero_processo', '')} Autor: {dados.get('PRIMEIRO_AUTOR', '')} Réu: {dados.get('NOME COMPLETO DO RÉU', '')}"
+             paragrafo.text = paragrafo.text.replace("Processo: [NUMERO DO PROCESSO]Autor: [nome do autor]Réu: [nome do réu]", f"Processo: {texto_resumo}")
+
         
         # 2.2. Substituição de campos simples 
         substituir_em_paragrafo(paragrafo, dados)
@@ -304,7 +332,11 @@ def gerar_laudo(
     # 3.3. Geração e Inserção da Análise Detalhada de EOG (5.2)
     gerar_bloco_analise_dinamica(doc, dados)
     
-    # 3.4. Inserção de Adendos Gráficos (Bloco 6) - Inclui Tabela e Gráfico EOG
-    inserir_imagens_em_secao(doc, "6. ADENDOS GRÁFICOS", adendos, "Adendo")
+    # 3.4. Inserção de ANEXOS (Imagens de Quesitos)
+    # Reutiliza a função genérica para inserir as imagens dos quesitos (Seção de Anexos)
+    inserir_imagens_em_secao(doc, "6. ANEXOS (IMAGENS DE QUESITOS)", quesito_images_list, "Imagem Quesito")
+    
+    # 3.5. Inserção de ADENDOS GRÁFICOS (Bloco 7, ou após Anexos)
+    inserir_imagens_em_secao(doc, "7. ADENDOS GRÁFICOS", adendos, "Adendo")
 
     doc.save(caminho_saida)
