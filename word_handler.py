@@ -210,22 +210,13 @@ def carregar_indice_processos():
     ]
 
     try:
-        # Garante que o segredo seja interpretado como dicionário
         credentials = Credentials.from_service_account_info(
             dict(st.secrets["gcp_service_account"]),
             scopes=SCOPES
         )
         client = gspread.authorize(credentials)
-
-        # Abre a planilha via URL
         spreadsheet = client.open_by_url(st.secrets["spreadsheet_url"])
-
-        # Tenta acessar a aba "Índice"; se não existir, usa a primeira aba
-        try:
-            worksheet = spreadsheet.worksheet("Índice")
-        except gspread.exceptions.WorksheetNotFound:
-            worksheet = spreadsheet.sheet1
-
+        worksheet = spreadsheet.sheet1  # ou .worksheet("Índice") se for o nome da aba
         dados = worksheet.get_all_records()
         return dados
 
