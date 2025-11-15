@@ -38,15 +38,43 @@ with st.expander("➕ Adicionar Novo Processo"):
         submitted = st.form_submit_button("Salvar")
 
         if submitted:
-            if not novo_id or not novo_autor or not novo_reu:
-                st.error("Preencha todos os campos obrigatórios.")
-            elif processo_existe(novo_id):
-                st.warning("Este número de processo já está cadastrado.")
-            else:
-                atualizado_em = datetime.now().strftime("%d/%m/%Y %H:%M")
-                inserir_processo(novo_id, novo_autor, novo_reu, novo_status, atualizado_em)
-                st.success(f"✅ Processo {novo_id} adicionado com sucesso!")
-                st.rerun()
+           # Salva no banco
+inserir_processo(novo_id, novo_autor, novo_reu, novo_status, atualizado_em)
+
+# Salva como JSON para edição futura
+dados_iniciais = {
+    "numero_processo": novo_id,
+    "autor_0": novo_autor,
+    "reu_0": novo_reu,
+    "etapas_concluidas": [],
+    "doc_padrao": None,
+    "documentos_questionados_list": [],
+}
+with open(f"data/{novo_id}.json", "w", encoding="utf-8") as f:
+    json.dump(dados_iniciais, f, ensure_ascii=False, indent=2)
+
+# Redireciona para edição
+st.session_state["process_to_load"] = novo_id
+st.success(f"✅ Processo {novo_id} criado. Redirecionando para edição...")
+st.switch_page("pages/01_Gerar_laudo.py")# Salva no banco
+inserir_processo(novo_id, novo_autor, novo_reu, novo_status, atualizado_em)
+
+# Salva como JSON para edição futura
+dados_iniciais = {
+    "numero_processo": novo_id,
+    "autor_0": novo_autor,
+    "reu_0": novo_reu,
+    "etapas_concluidas": [],
+    "doc_padrao": None,
+    "documentos_questionados_list": [],
+}
+with open(f"data/{novo_id}.json", "w", encoding="utf-8") as f:
+    json.dump(dados_iniciais, f, ensure_ascii=False, indent=2)
+
+# Redireciona para edição
+st.session_state["process_to_load"] = novo_id
+st.success(f"✅ Processo {novo_id} criado. Redirecionando para edição...")
+st.switch_page("pages/01_Gerar_laudo.py")
 
 # --- Exclusão de processos do banco ---
 with st.expander("🗑️ Excluir Processo do Banco de Dados"):

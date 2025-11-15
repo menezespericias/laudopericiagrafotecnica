@@ -13,6 +13,18 @@ st.set_page_config(page_title="Laudo Grafotécnico", layout="wide")
 
 DATA_FOLDER = "data"
 
+if "process_to_load" in st.session_state:
+    process_id = st.session_state["process_to_load"]
+    json_path = f"data/{process_id}.json"
+    if os.path.exists(json_path):
+        with open(json_path, "r", encoding="utf-8") as f:
+            dados = json.load(f)
+        st.success(f"Processo {process_id} carregado para edição.")
+    else:
+        st.error("Processo não encontrado.")
+else:
+    st.warning("Nenhum processo selecionado.")
+
 # --- Inicialização do Estado de Sessão ---
 # Inicializa estado de sessão, mantendo a coerência entre as etapas e dados
 if "etapas_concluidas" not in st.session_state:
