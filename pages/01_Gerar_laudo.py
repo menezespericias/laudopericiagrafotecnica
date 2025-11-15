@@ -4,30 +4,57 @@ import json
 from datetime import date, datetime
 from num2words import num2words
 from typing import List, Dict, Any, Union
-from word_handler import gerar_laudo # Importa a função de geração do laudo
-from data_handler import save_process_data, load_process_data # Importa funções de I/O de JSON
-from db_handler import atualizar_status # Importa função de atualização do DB
+from word_handler import gerar_laudo
+from data_handler import save_process_data, load_process_data
+from db_handler import atualizar_status
 
 # --- Configuração Inicial ---
 st.set_page_config(page_title="Laudo Grafotécnico", layout="wide")
 DATA_FOLDER = "data"
-os.makedirs(DATA_FOLDER, exist_ok=True) # Garante que a pasta 'data' existe
+os.makedirs(DATA_FOLDER, exist_ok=True)
 
 # --- Variáveis Globais ---
-# Caminho para o arquivo modelo (Obrigatório)
 CAMINHO_MODELO = "LAUDO PERICIAL GRAFOTÉCNICO.docx" 
-# Pasta de saída dos laudos gerados
 OUTPUT_FOLDER = "output"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 # --- Funções Auxiliares ---
 
+def get_date_object_from_state(key: str) -> date:
+    """Extrai e valida um valor de data do session_state, convertendo strings/listas para date.
+    
+    Esta função garante que o valor passado ao st.date_input seja SEMPRE um objeto date único.
+    """
+    data_val = st.session_state.get(key)
+    
+    if isinstance(data_val, (list, tuple)):
+        # TRATAMENTO CRÍTICO: Se for uma lista (causa do TypeError), tenta pegar o primeiro item
+        if data_val:
+            data_val = data_val[0]
+        else:
+            return date.today() # Lista vazia, volta para hoje
+
+    if isinstance(data_val, str) and data_val:
+        # Tenta converter a string "DD/MM/YYYY" (do JSON) para objeto date
+        try:
+            # Assumindo que a string salva no session_state é DD/MM/YYYY
+            return datetime.strptime(data_val, "%d/%m/%Y").date()
+        except:
+            pass # Falhou, continua para o fallback
+
+    elif isinstance(data_val, date):
+        # É um objeto date válido (após a primeira edição)
+        return data_val
+
+    # Fallback para data atual se a conversão falhar ou o tipo for inesperado
+    return date.today()
+
 def init_session_state():
     """Inicializa as chaves do session_state que não existem."""
     if 'editing_etapa_1' not in st.session_state:
-        st.session_state.editing_etapa_1 = True 
+        st.session_state.editing_etapa_1 = True
 
-    # CORREÇÃO FINAL para o AttributeError: Garante que etapas_concluidas seja sempre um SET.
+    # Garante que etapas_concluidas seja sempre um SET.
     if 'etapas_concluidas' not in st.session_state:
         st.session_state.etapas_concluidas = set()
     elif isinstance(st.session_state.etapas_concluidas, list):
@@ -41,7 +68,6 @@ def init_session_state():
     if 'reu' not in st.session_state:
         st.session_state.reu = ""
     
-    # Campos das demais etapas
     if 'quesitos_autor' not in st.session_state:
         st.session_state.quesitos_autor = []
     if 'quesitos_reu' not in st.session_state:
@@ -63,8 +89,8 @@ def init_session_state():
     ]
     for campo in campos_base:
         if campo not in st.session_state:
-            # Inicializa datas como string vazia (será tratada abaixo)
-            if 'DATA_' in campo or 'VENCIMENTO' in campo:
+            # Inicializa datas como string "hoje" no formato esperado
+            if campo in ["DATA_LAUDO", "HONORARIOS_VENCIMENTO"]:
                 st.session_state[campo] = date.today().strftime("%d/%m/%Y")
             else:
                 st.session_state[campo] = ""
@@ -75,10 +101,10 @@ def save_current_state():
         process_id = st.session_state.numero_processo
         
         try:
-            # 1. Salva os dados no JSON
+            # Salva os dados no JSON
             save_process_data(process_id, st.session_state)
             
-            # 2. ATUALIZA o status no banco de dados SQLite
+            # ATUALIZA o status no banco de dados SQLite
             NOVO_STATUS = "Em andamento"
             atualizar_status(process_id, NOVO_STATUS)
             
@@ -157,7 +183,6 @@ if "numero_processo" not in st.session_state or not st.session_state.numero_proc
 # --- TÍTULO PRINCIPAL ---
 st.title(f"👨‍🔬 Laudo Pericial: {st.session_state.numero_processo}")
 
-# Botão Voltar
 if st.button("🏠 Voltar para Home"):
     st.switch_page("home.py")
 
@@ -178,27 +203,13 @@ with st.expander(f"1. Dados Básicos do Processo - {st.session_state.numero_proc
         st.session_state.reu = st.text_area("Réu(s) (Um por linha)", value=st.session_state.get("reu", ""))
 
     with col3:
-        # Pega a data de conclusão do laudo do estado.
-        data_laudo_val = st.session_state.get("DATA_LAUDO")
-        data_obj = date.today() # Define um valor padrão seguro
-        
-        # 1. Tenta converter a string de data (do JSON) para objeto date.
-        if isinstance(data_laudo_val, str):
-            try:
-                data_obj = datetime.strptime(data_laudo_val, "%d/%m/%Y").date()
-            except:
-                data_obj = date.today() # Usa a data atual se a string for inválida
-        # 2. Se for uma lista (o problema recorrente), usa a data atual
-        elif isinstance(data_laudo_val, (list, tuple)):
-            data_obj = date.today()
-        # 3. Se for um objeto date/datetime válido (após primeira edição), usa-o
-        elif isinstance(data_laudo_val, date):
-             data_obj = data_laudo_val
+        # Usa a função robusta para obter um objeto date único
+        data_obj = get_date_object_from_state("DATA_LAUDO")
             
         # 4. Renderiza o widget e captura o objeto date retornado
         data_input_result = st.date_input("Data da Conclusão do Laudo", value=data_obj, key="input_data_laudo")
         
-        # CORREÇÃO FINAL: Converte o objeto date retornado pelo widget para a string esperada para o JSON
+        # CORREÇÃO CRÍTICA: Converte o objeto date retornado pelo widget para a string esperada para o JSON
         st.session_state.DATA_LAUDO = data_input_result.strftime("%d/%m/%Y")
         
         st.session_state.PERITO = st.text_input("Nome do Perito", value=st.session_state.get("PERITO", ""))
@@ -213,7 +224,7 @@ st.markdown("---")
 
 # --- ETAPA 2: PEÇAS E QUESITOS ---
 with st.expander("2. Peças e Quesitos"):
-    # ... (O restante do código da Etapa 2 é mantido)
+    
     # Formulário para adicionar Quesitos do Autor
     with st.form("form_quesitos_autor"):
         st.subheader("Quesitos do Autor")
@@ -382,28 +393,14 @@ with st.expander("7. Conclusão e Informações Finais"):
         st.session_state.HONORARIOS_VALOR = st.text_input("Valor dos Honorários (R$)", 
                                                           value=st.session_state.get("HONORARIOS_VALOR", ""))
     with col_h2:
-        # Pega a data de vencimento do estado.
-        data_vencimento_val = st.session_state.get("HONORARIOS_VENCIMENTO")
-        data_obj_v = date.today()
-        
-        # 1. Tenta converter a string de data (do JSON) para objeto date.
-        if isinstance(data_vencimento_val, str):
-            try:
-                data_obj_v = datetime.strptime(data_vencimento_val, "%d/%m/%Y").date()
-            except:
-                data_obj_v = date.today()
-        # 2. Se for uma lista (o problema recorrente), usa a data atual
-        elif isinstance(data_vencimento_val, (list, tuple)):
-            data_obj_v = date.today()
-        # 3. Se for um objeto date/datetime válido (após primeira edição), usa-o
-        elif isinstance(data_vencimento_val, date):
-             data_obj_v = data_vencimento_val
+        # Usa a função robusta para obter um objeto date único
+        data_obj_v = get_date_object_from_state("HONORARIOS_VENCIMENTO")
             
         # 4. Renderiza o widget e captura o objeto date retornado
         data_vencimento_result = st.date_input("Data de Vencimento do Pagamento", 
                                                                value=data_obj_v, key="input_data_vencimento")
         
-        # CORREÇÃO FINAL: Converte o objeto date retornado pelo widget para a string esperada para o JSON
+        # CORREÇÃO CRÍTICA: Converte o objeto date retornado pelo widget para a string esperada para o JSON
         st.session_state.HONORARIOS_VENCIMENTO = data_vencimento_result.strftime("%d/%m/%Y")
 
     st.session_state.etapas_concluidas.add(7)
