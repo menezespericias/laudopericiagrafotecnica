@@ -4,18 +4,25 @@ import json
 from datetime import date, datetime
 from num2words import num2words
 from typing import List, Dict, Any, Union
+# Assumindo que word_handler.py, data_handler.py e db_handler.py estão no mesmo nível
+# ou foram importados corretamente via PYTHONPATH
 from word_handler import gerar_laudo
 from data_handler import save_process_data, load_process_data
 from db_handler import atualizar_status
 
 # --- Configuração Inicial ---
 st.set_page_config(page_title="Laudo Grafotécnico", layout="wide")
-DATA_FOLDER = "data"
-os.makedirs(DATA_FOLDER, exist_ok=True)
+
+# Correção do erro PackageNotFoundError: Garante o caminho absoluto para o modelo
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.join(SCRIPT_DIR, '..')
 
 # --- Variáveis Globais ---
-CAMINHO_MODELO = "LAUDO PERICIAL GRAFOTÉCNICO.docx" 
-OUTPUT_FOLDER = "output"
+CAMINHO_MODELO = os.path.join(PROJECT_ROOT, "LAUDO PERICIAL GRAFOTÉCNICO.docx") 
+OUTPUT_FOLDER = os.path.join(PROJECT_ROOT, "output")
+DATA_FOLDER = os.path.join(PROJECT_ROOT, "data")
+
+os.makedirs(DATA_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 # --- Funções de Callback (Defesa na Escrita) ---
@@ -32,14 +39,11 @@ def update_session_date_format(key_data: str, key_input: str):
         # Converte o objeto date para a string no formato desejado
         if isinstance(date_object, date):
             st.session_state[key_data] = date_object.strftime("%d/%m/%Y")
-        # Tratamento defensivo (caso extremo)
         elif isinstance(date_object, (list, tuple)) and date_object and isinstance(date_object[0], date):
             st.session_state[key_data] = date_object[0].strftime("%d/%m/%Y")
             
     except KeyError:
         pass
-    except Exception as e:
-        st.error(f"Erro no callback de data para {key_data}: {e}")
 
 def update_laudo_date():
     """Callback para a data de conclusão do laudo."""
@@ -50,73 +54,49 @@ def update_vencimento_date():
     update_session_date_format("HONORARIOS_VENCIMENTO", "input_data_vencimento")
 
 
-# --- Funções Auxiliares (Defesa na Leitura e Sanitização) ---
-
-def sanitize_date_state(key: str):
-    """
-    Sanitiza o valor da data no session_state. Roda após o carregamento do JSON.
-    Força o valor a ser uma STRING limpa 'DD/MM/YYYY' ou a data de hoje.
-    """
-    data_val = st.session_state.get(key)
-    
-    # 1. TRATAMENTO DE LISTA (CAUSA PRINCIPAL DA CORRUPÇÃO)
-    if isinstance(data_val, (list, tuple)) and data_val:
-        # Pega o primeiro item da lista para tentar a conversão
-        data_val = data_val[0]
-        
-    # 2. Tenta converter objeto date para string (se já foi convertido por alguma lógica)
-    if isinstance(data_val, date):
-        st.session_state[key] = data_val.strftime("%d/%m/%Y")
-        return
-    
-    # 3. TRATAMENTO DE STRING
-    if isinstance(data_val, str) and data_val:
-        data_str = data_val.strip()
-        
-        # Tenta formatos comuns de data que podem estar no JSON
-        formatos = ["%d/%m/%Y", "%Y-%m-%d"] 
-        
-        for fmt in formatos:
-            try:
-                # Tenta converter a string para objeto date e volta para string, garantindo formato limpo
-                obj = datetime.strptime(data_str, fmt).date()
-                st.session_state[key] = obj.strftime("%d/%m/%Y")
-                return
-            except:
-                continue 
-
-    # 4. Fallback: Se for None, vazio ou falha, define a data atual como string e salva.
-    st.session_state[key] = date.today().strftime("%d/%m/%Y")
-
+# --- Funções Auxiliares (Sanitização Máxima de Data) ---
 
 def get_date_object_from_state(key: str) -> date:
     """
-    Roda após a sanitização: Extrai o valor do state e garante que seja um objeto date
-    para ser usado no 'value' do st.date_input.
+    Sanitização Máxima: Extrai e valida o valor de data do session_state, 
+    forçando-o a ser um único objeto date, tratando listas de strings, strings e objetos date.
     """
     data_val = st.session_state.get(key)
-    
-    # Prioriza o objeto date, se já existir
-    if isinstance(data_val, date):
-        return data_val
 
-    # Assume que a sanitização deixou uma string limpa
+    # 1. TRATAMENTO DE LISTA/TUPLA (A causa do TypeError)
+    if isinstance(data_val, (list, tuple)) and data_val:
+        # Pega o primeiro item, que deve ser a string ou o objeto date
+        data_val = data_val[0]
+
+    # 2. Tenta converter STRING ("DD/MM/YYYY" ou "YYYY-MM-DD" do JSON) para objeto date
     if isinstance(data_val, str) and data_val:
+        data_str = data_val.strip()
+        
+        # Tenta formato DD/MM/YYYY
         try:
-            return datetime.strptime(data_val, "%d/%m/%Y").date()
+            return datetime.strptime(data_str, "%d/%m/%Y").date()
+        except:
+            pass 
+        
+        # Tenta formato YYYY-MM-DD (Comum em serialização Streamlit)
+        try:
+            return datetime.strptime(data_str, "%Y-%m-%d").date()
         except:
             pass
-            
-    # Fallback
-    return date.today()
 
+    # 3. Se já for um objeto date válido, retorna
+    elif isinstance(data_val, date):
+        return data_val
+
+    # 4. Fallback (data atual)
+    return date.today()
 
 def init_session_state():
     """Inicializa as chaves do session_state que não existem."""
     if 'editing_etapa_1' not in st.session_state:
         st.session_state.editing_etapa_1 = True
 
-    # CORREÇÃO CRÍTICA DO AttributeError: Garante que etapas_concluidas seja sempre um SET.
+    # Garante que etapas_concluidas seja sempre um SET.
     if 'etapas_concluidas' not in st.session_state:
         st.session_state.etapas_concluidas = set()
     elif not isinstance(st.session_state.etapas_concluidas, set):
@@ -155,7 +135,10 @@ def save_current_state():
             update_vencimento_date()
             
             # 2. Salva os dados no JSON
-            save_process_data(process_id, st.session_state)
+            # st.session_state é serializável porque as datas foram forçadas a ser strings.
+            # Os objetos de imagem (UploadedFile) são ignorados pelo JSON, mas podem ser 
+            # mantidos no state para a função de geração.
+            save_process_data(process_id, st.session_state) 
             
             # 3. ATUALIZA o status no banco de dados SQLite
             NOVO_STATUS = "Em andamento"
@@ -169,12 +152,8 @@ def save_current_state():
             st.toast(f"✅ Dados do Processo {process_id} salvos e status atualizado para '{NOVO_STATUS}'.")
             return True
             
-        except ValueError as e:
-            st.error(f"Erro ao salvar: {e}")
-            return False
         except Exception as e:
             st.error(f"Erro inesperado ao salvar: {e}")
-            st.warning("Pode haver um problema de sincronização entre o arquivo JSON e o Banco de Dados.")
             return False
     else:
         st.error("Erro: Número do Processo não definido para salvar.")
@@ -209,10 +188,6 @@ if "process_to_load" in st.session_state and st.session_state["process_to_load"]
         # Carrega os dados para o session_state
         for key, value in dados_carregados.items():
             st.session_state[key] = value
-
-        # PASSO CRÍTICO: SANITIZAÇÃO DE DATA APÓS CARREGAMENTO DO JSON
-        sanitize_date_state("DATA_LAUDO")
-        sanitize_date_state("HONORARIOS_VENCIMENTO")
 
         st.success(f"📂 Processo **{process_id}** carregado com sucesso!")
         
@@ -266,7 +241,7 @@ with st.expander(f"1. Dados Básicos do Processo - {st.session_state.numero_proc
         st.session_state.reu = st.text_area("Réu(s) (Um por linha)", value=st.session_state.get("reu", ""))
 
     with col3:
-        # Defesa na Leitura: Obtém um objeto date único, tratando listas e strings corrompidas.
+        # PONTO CRÍTICO CORRIGIDO: Usa a função de sanitização máxima para o valor
         data_obj = get_date_object_from_state("DATA_LAUDO")
             
         st.date_input(
@@ -281,7 +256,6 @@ with st.expander(f"1. Dados Básicos do Processo - {st.session_state.numero_proc
         st.session_state.ESPECIALIZACAO = st.text_input("Especialização (Ex: Grafotécnico)", value=st.session_state.get("ESPECIALIZACAO", ""))
         
     if st.button("💾 Salvar Dados Básicos (Etapa 1)"):
-        # O save_current_state já chama update_laudo_date e update_vencimento_date
         if save_current_state():
             st.session_state.editing_etapa_1 = False
             st.rerun()
@@ -313,8 +287,7 @@ with st.expander("2. Peças e Quesitos"):
         for q in st.session_state.quesitos_autor:
             col_q1, col_q2 = st.columns([4, 1])
             col_q1.write(f"**Quesito {q['id']}:** {q['texto']}")
-            if q.get('imagem_obj'):
-                col_q1.image(q['imagem_obj'], caption=f"Imagem do Quesito {q['id']}", width=200)
+            # Não exibe a imagem aqui para evitar recargas excessivas, mas garante o botão de remover
             if col_q2.button("🗑️ Remover", key=f"del_quesito_autor_{q['id']}"):
                 remove_list_item("quesitos_autor", q['id'])
     
@@ -342,8 +315,6 @@ with st.expander("2. Peças e Quesitos"):
         for q in st.session_state.quesitos_reu:
             col_q1, col_q2 = st.columns([4, 1])
             col_q1.write(f"**Quesito {q['id']}:** {q['texto']}")
-            if q.get('imagem_obj'):
-                col_q1.image(q['imagem_obj'], caption=f"Imagem do Quesito {q['id']}", width=200)
             if col_q2.button("🗑️ Remover", key=f"del_quesito_reu_{q['id']}"):
                 remove_list_item("quesitos_reu", q['id'])
     
@@ -353,7 +324,7 @@ with st.expander("2. Peças e Quesitos"):
 st.markdown("---")
 
 # --- ETAPA 3: DOCUMENTOS ANEXADOS ---
-with st.expander("3. Documentos Anexados e Peças de Exame"):
+with st.expander("3. Peças de Exame e Documentos Anexados"):
     
     col_pecas, col_docs = st.columns([1, 2])
     
@@ -366,7 +337,7 @@ with st.expander("3. Documentos Anexados e Peças de Exame"):
     with col_docs:
         # Formulário para adicionar Anexos
         with st.form("form_anexos"):
-            st.subheader("Documentos Anexados")
+            st.subheader("Documentos Anexados (Anexo A)")
             novo_anexo_descricao = st.text_input("Descrição do Documento Anexado")
             imagem_anexo = st.file_uploader("Imagem do Anexo", type=['png', 'jpg', 'jpeg'], key="upload_anexo")
             
@@ -386,8 +357,6 @@ with st.expander("3. Documentos Anexados e Peças de Exame"):
             for a in st.session_state.anexos:
                 col_a1, col_a2 = st.columns([4, 1])
                 col_a1.write(f"**Anexo {a['id']}:** {a['descricao']}")
-                if a.get('imagem_obj'):
-                    col_a1.image(a['imagem_obj'], caption=f"Anexo {a['id']}", width=200)
                 if col_a2.button("🗑️ Remover", key=f"del_anexo_{a['id']}"):
                     remove_list_item("anexos", a['id'])
 
@@ -442,8 +411,6 @@ with st.expander("6. Adendos Gráficos (Tabelas e Imagens no Corpo do Laudo)"):
         for d in st.session_state.adendos:
             col_d1, col_d2 = st.columns([4, 1])
             col_d1.write(f"**Adendo {d['id']}:** {d['legenda']}")
-            if d.get('imagem_obj'):
-                col_d1.image(d['imagem_obj'], caption=f"Adendo {d['id']}", width=200)
             if col_d2.button("🗑️ Remover", key=f"del_adendo_{d['id']}"):
                 remove_list_item("adendos", d['id'])
     
@@ -464,7 +431,7 @@ with st.expander("7. Conclusão e Informações Finais"):
         st.session_state.HONORARIOS_VALOR = st.text_input("Valor dos Honorários (R$)", 
                                                           value=st.session_state.get("HONORARIOS_VALOR", ""))
     with col_h2:
-        # Defesa na Leitura: Obtém um objeto date único, tratando listas e strings corrompidas.
+        # PONTO CRÍTICO CORRIGIDO: Usa a função de sanitização máxima para o valor
         data_obj_v = get_date_object_from_state("HONORARIOS_VENCIMENTO")
             
         st.date_input(
@@ -484,11 +451,10 @@ st.markdown("---")
 with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_concluidas if isinstance(st.session_state.etapas_concluidas, set) else False)):
     st.subheader("Configurações de Geração")
     
-    caminho_modelo = CAMINHO_MODELO
     caminho_saida = os.path.join(OUTPUT_FOLDER, f"Laudo_{st.session_state.numero_processo}.docx")
     
-    st.write(f"Modelo a ser usado: **{caminho_modelo}**")
-    st.write(f"Arquivo de saída: **{caminho_saida}**")
+    st.write(f"Modelo a ser usado: **{os.path.basename(CAMINHO_MODELO)}**")
+    st.write(f"Arquivo de saída: **{os.path.basename(caminho_saida)}** (salvo em `{os.path.basename(OUTPUT_FOLDER)}/`)")
 
     # Verifica se pelo menos 7 etapas estão concluídas para habilitar o botão
     is_disabled = not(isinstance(st.session_state.etapas_concluidas, set) and len(st.session_state.etapas_concluidas) >= 7)
@@ -499,12 +465,16 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
         update_laudo_date()
         update_vencimento_date()
         
-        dados = {k: v for k, v in st.session_state.items() if not k.startswith("editing_") and k not in ["process_to_load", "etapas_concluidas"]}
-        dados['AUTORES'] = dados.get('autor', '').split('\n')
-        dados['REUS'] = dados.get('reu', '').split('\n')
+        # Filtra apenas os dados simples para passar ao gerador de Word
+        dados_simples = {k: v for k, v in st.session_state.items() if not k.startswith("editing_") and k not in ["process_to_load", "etapas_concluidas"]}
+        
+        # Trata os campos de lista que precisam ir ao Word Handler
+        dados_simples['AUTORES'] = dados_simples.get('autor', '').split('\n')
+        dados_simples['REUS'] = dados_simples.get('reu', '').split('\n')
         
         quesito_images_list = []
         
+        # Prepara as imagens dos quesitos
         for q in st.session_state.quesitos_autor:
             if q.get("imagem_obj"):
                 quesito_images_list.append({
@@ -523,19 +493,17 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
 
         try:
             gerar_laudo(
-                caminho_modelo=caminho_modelo,
+                caminho_modelo=CAMINHO_MODELO,
                 caminho_saida=caminho_saida,
-                dados=dados,
+                dados=dados_simples,
                 anexos=st.session_state.anexos,
                 adendos=st.session_state.adendos,
                 quesito_images_list=quesito_images_list
             )
             
             if isinstance(st.session_state.etapas_concluidas, set):
-                st.session_state.etapas_concluidas.add(8) # Marca a etapa 8 como concluída
+                st.session_state.etapas_concluidas.add(8) 
             
-            # Salva o estado atualizado do processo (garante que dados de conclusão estejam no JSON)
-            # A função save_current_state já faz isso e chama save_process_data.
             if save_current_state():
                  st.success(f"Laudo **{st.session_state.numero_processo}** gerado com sucesso!")
             
@@ -549,8 +517,7 @@ with st.expander("8. Gerar Laudo Final", expanded=(8 in st.session_state.etapas_
                 )
 
         except FileNotFoundError:
-            st.error(f"❌ Erro: O arquivo de modelo não foi encontrado em: `{caminho_modelo}`.")
-            st.warning("Certifique-se de que o arquivo 'LAUDO PERICIAL GRAFOTÉCNICO.docx' está na raiz do projeto.")
+            st.error(f"❌ Erro de Arquivo: O arquivo de modelo não foi encontrado. Verifique se o arquivo 'LAUDO PERICIAL GRAFOTÉCNICO.docx' está na raiz do projeto (diretório acima da pasta 'pages').")
         except Exception as e:
             st.error(f"❌ Erro durante a geração do documento: {e}")
             st.exception(e)
