@@ -9,7 +9,7 @@ from db_handler import (
     listar_processos,
     inserir_processo,
     processo_existe,
-    excluir_processo  # ✅ Função de exclusão integrada
+    excluir_processo
 )
 
 # --- Configuração Inicial ---
@@ -38,43 +38,30 @@ with st.expander("➕ Adicionar Novo Processo"):
         submitted = st.form_submit_button("Salvar")
 
         if submitted:
-           # Salva no banco
-inserir_processo(novo_id, novo_autor, novo_reu, novo_status, atualizado_em)
+            if not novo_id or not novo_autor or not novo_reu:
+                st.error("Preencha todos os campos obrigatórios.")
+            elif processo_existe(novo_id):
+                st.warning("Este número de processo já está cadastrado.")
+            else:
+                atualizado_em = datetime.now().strftime("%d/%m/%Y %H:%M")
+                inserir_processo(novo_id, novo_autor, novo_reu, novo_status, atualizado_em)
 
-# Salva como JSON para edição futura
-dados_iniciais = {
-    "numero_processo": novo_id,
-    "autor_0": novo_autor,
-    "reu_0": novo_reu,
-    "etapas_concluidas": [],
-    "doc_padrao": None,
-    "documentos_questionados_list": [],
-}
-with open(f"data/{novo_id}.json", "w", encoding="utf-8") as f:
-    json.dump(dados_iniciais, f, ensure_ascii=False, indent=2)
+                # Salva como JSON para edição futura
+                dados_iniciais = {
+                    "numero_processo": novo_id,
+                    "autor_0": novo_autor,
+                    "reu_0": novo_reu,
+                    "etapas_concluidas": [],
+                    "doc_padrao": None,
+                    "documentos_questionados_list": [],
+                }
+                os.makedirs("data", exist_ok=True)
+                with open(f"data/{novo_id}.json", "w", encoding="utf-8") as f:
+                    json.dump(dados_iniciais, f, ensure_ascii=False, indent=2)
 
-# Redireciona para edição
-st.session_state["process_to_load"] = novo_id
-st.success(f"✅ Processo {novo_id} criado. Redirecionando para edição...")
-st.switch_page("pages/01_Gerar_laudo.py")# Salva no banco
-inserir_processo(novo_id, novo_autor, novo_reu, novo_status, atualizado_em)
-
-# Salva como JSON para edição futura
-dados_iniciais = {
-    "numero_processo": novo_id,
-    "autor_0": novo_autor,
-    "reu_0": novo_reu,
-    "etapas_concluidas": [],
-    "doc_padrao": None,
-    "documentos_questionados_list": [],
-}
-with open(f"data/{novo_id}.json", "w", encoding="utf-8") as f:
-    json.dump(dados_iniciais, f, ensure_ascii=False, indent=2)
-
-# Redireciona para edição
-st.session_state["process_to_load"] = novo_id
-st.success(f"✅ Processo {novo_id} criado. Redirecionando para edição...")
-st.switch_page("pages/01_Gerar_laudo.py")
+                st.session_state["process_to_load"] = novo_id
+                st.success(f"✅ Processo {novo_id} criado. Redirecionando para edição...")
+                st.switch_page("pages/01_Gerar_laudo.py")
 
 # --- Exclusão de processos do banco ---
 with st.expander("🗑️ Excluir Processo do Banco de Dados"):
@@ -85,16 +72,17 @@ with st.expander("🗑️ Excluir Processo do Banco de Dados"):
         processo_selecionado = st.selectbox("Selecione o processo para excluir", processo_ids)
         if st.button("Excluir Processo"):
             excluir_processo(processo_selecionado)
+            json_path = f"data/{processo_selecionado}.json"
+            if os.path.exists(json_path):
+                os.remove(json_path)
             st.success(f"✅ Processo {processo_selecionado} excluído com sucesso!")
             st.rerun()
     else:
         st.info("Nenhum processo disponível para exclusão.")
 
-# --- Pastas locais ---
+# --- Processos locais via JSON ---
 DATA_FOLDER = "data"
 ARCHIVED_FOLDER = os.path.join(DATA_FOLDER, "arquivados")
-
-# --- Funções de Gestão de Arquivos JSON ---
 
 def load_process_list(source_folder=DATA_FOLDER):
     if not os.path.exists(source_folder):
@@ -156,10 +144,6 @@ def delete_process(process_id, is_archived=False):
     except FileNotFoundError:
         st.error(f"❌ Erro: Processo {process_id} não encontrado.")
     st.rerun()
-
-def load_and_redirect(process_id):
-    st.session_state["process_to_load"] = process_id
-    pass
 
 # --- Processos Ativos ---
 st.header("Processos Ativos em Andamento")
