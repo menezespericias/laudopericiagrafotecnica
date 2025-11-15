@@ -19,13 +19,6 @@ init_db()
 st.title("Bem-vindo ao Gerador de Laudos")
 st.write("Selecione 'Gerar Laudo' no menu lateral.")
 
-# --- Índice de Processos via SQLite ---
-    if processos:
-        df = pd.DataFrame(processos, columns=["ID", "Autor", "Réu", "Status", "Atualizado em"])
-        st.dataframe(df, use_container_width=True)
-    else:
-        st.warning("Nenhum processo encontrado no banco de dados.")
-
 # --- Formulário para adicionar novo processo ---
 with st.expander("➕ Adicionar Novo Processo"):
     with st.form("novo_processo_form"):
@@ -44,15 +37,15 @@ with st.expander("➕ Adicionar Novo Processo"):
                 atualizado_em = datetime.now().strftime("%d/%m/%Y %H:%M")
                 inserir_processo(novo_id, novo_autor, novo_reu, novo_status, atualizado_em)
 
-                # Salva como JSON para edição futura
                 dados_iniciais = {
                     "numero_processo": novo_id,
-                    "autor_0": novo_autor,
-                    "reu_0": novo_reu,
+                    "autor": novo_autor,
+                    "reu": novo_reu,
+                    "status_processo": novo_status,
                     "etapas_concluidas": [],
-                    "doc_padrao": None,
-                    "documentos_questionados_list": [],
+                    "data_laudo": datetime.today().strftime("%Y-%m-%d")
                 }
+
                 os.makedirs("data", exist_ok=True)
                 with open(f"data/{novo_id}.json", "w", encoding="utf-8") as f:
                     json.dump(dados_iniciais, f, ensure_ascii=False, indent=2)
@@ -78,112 +71,47 @@ with st.expander("🗑️ Excluir Processo do Banco de Dados"):
     else:
         st.info("Nenhum processo disponível para exclusão.")
 
-# --- Processos locais via JSON ---
-DATA_FOLDER = "data"
-ARCHIVED_FOLDER = os.path.join(DATA_FOLDER, "arquivados")
-
-def load_process_list(source_folder=DATA_FOLDER):
-    if not os.path.exists(source_folder):
-        return []
-
-    process_list = []
-    files_to_check = [f for f in os.listdir(source_folder) if f.endswith(".json")]
-
-    for filename in files_to_check:
-        filepath = os.path.join(source_folder, filename)
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-                missing = []
-                if not data.get("numero_processo"): missing.append("Nº Processo")
-                if not data.get("autor_0"): missing.append("Autor")
-                if not data.get("reu_0"): missing.append("Réu")
-                if "Apresentação" not in data.get("etapas_concluidas", []): missing.append("Etapa 1")
-                if not data.get("doc_padrao"): missing.append("Docs. Padrão")
-                if not data.get("documentos_questionados_list") or not all(d.get("TIPO_DOCUMENTO") for d in data.get("documentos_questionados_list", [])):
-                    missing.append("Docs. Questionados")
-
-                process_list.append({
-                    "id": filename.replace(".json", ""),
-                    "nome": f"{data.get('autor_0', 'AUTOR')} x {data.get('reu_0', 'RÉU')}",
-                    "tags": ", ".join(missing),
-                    "status_etapa": f"{len(data.get('etapas_concluidas', []))}/10 concluídas",
-                    "path": filepath,
-                })
-        except Exception:
-            process_list.append({
-                "id": filename.replace(".json", ""),
-                "nome": "Erro ao carregar (JSON inválido)",
-                "tags": "JSON INVÁLIDO",
-                "status_etapa": "N/A",
-                "path": filepath,
-            })
-
-    return process_list
-
-def archive_process(process_id):
-    source_path = os.path.join(DATA_FOLDER, f"{process_id}.json")
-    target_path = os.path.join(ARCHIVED_FOLDER, f"{process_id}.json")
-    os.makedirs(ARCHIVED_FOLDER, exist_ok=True)
-    try:
-        shutil.move(source_path, target_path)
-        st.toast(f"✅ Processo {process_id} arquivado com sucesso!")
-    except FileNotFoundError:
-        st.error(f"❌ Erro: Processo {process_id} não encontrado.")
-    st.rerun()
-
-def delete_process(process_id, is_archived=False):
-    folder = ARCHIVED_FOLDER if is_archived else DATA_FOLDER
-    file_path = os.path.join(folder, f"{process_id}.json")
-    try:
-        os.remove(file_path)
-        st.toast(f"🗑️ Processo {process_id} excluído permanentemente!")
-    except FileNotFoundError:
-        st.error(f"❌ Erro: Processo {process_id} não encontrado.")
-    st.rerun()
-
-# --- Processos Ativos ---
+# --- Processos Ativos em Andamento ---
 st.header("Processos Ativos em Andamento")
-active_processes = load_process_list(DATA_FOLDER)
-
-if active_processes:
-    for process in active_processes:
-        with st.container(border=True):
-            col_id, col_tags, col_actions = st.columns([1, 4, 2])
-
-            col_id.markdown(f"**Nº Processo:** `{process['id']}`")
-            col_id.markdown(f"**{process['status_etapa']}**")
-
-            col_tags.markdown(f"**Partes:** {process['nome']}")
-            if process['tags'] and process['tags'] != "JSON INVÁLIDO":
-                col_tags.markdown(f"**⚠️ Faltando:** ` {process['tags']} `")
-            else:
-                col_tags.markdown("✅ **Status:** Pronto para Emissão ou Dados Incompletos")
-
-            col_actions.page_link(
-                "pages/01_Gerar_laudo.py",
-                label="✏️ Continuar Edição",
-                icon="▶️",
-                help="Clique para ir à página e carregar os dados deste processo."
-            )
-            col_actions.button("📁 Arquivar", key=f"archive_{process['id']}", on_click=archive_process, args=(process['id'],), help="Move o processo para a lista de arquivados.")
+arquivos = [f for f in os.listdir("data") if f.endswith(".json") and not f.startswith("arquivados")]
+if arquivos:
+    for arquivo in arquivos:
+        caminho = os.path.join("data", arquivo)
+        with open(caminho, "r", encoding="utf-8") as f:
+            dados = json.load(f)
+        processo_id = dados.get("numero_processo", arquivo.replace(".json", ""))
+        partes = f"{dados.get('autor', 'Autor')} x {dados.get('reu', 'Réu')}"
+        etapas = dados.get("etapas_concluidas", [])
+        st.markdown(f"**Processo:** `{processo_id}`")
+        st.markdown(f"**Partes:** {partes}")
+        st.markdown(f"**Etapas concluídas:** {len(etapas)}")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.page_link("pages/01_Gerar_laudo.py", label="✏️ Continuar Edição", icon="▶️")
+        with col2:
+            if st.button("📁 Arquivar", key=f"arquivar_{processo_id}"):
+                os.makedirs("data/arquivados", exist_ok=True)
+                shutil.move(caminho, f"data/arquivados/{arquivo}")
+                st.success(f"Processo {processo_id} arquivado.")
+                st.rerun()
 else:
-    st.info("Nenhum processo ativo encontrado. Crie um novo na página 'Gerar Laudo'.")
-
-st.markdown("---")
+    st.info("Nenhum processo ativo encontrado.")
 
 # --- Processos Arquivados ---
 st.header("Processos Arquivados")
-archived_processes = load_process_list(ARCHIVED_FOLDER)
-
-if archived_processes:
+arquivados = [f for f in os.listdir("data/arquivados") if f.endswith(".json")] if os.path.exists("data/arquivados") else []
+if arquivados:
     with st.expander("Mostrar Processos Arquivados"):
-        for process in archived_processes:
-            with st.container(border=True):
-                col_id, col_nome, col_actions = st.columns([1, 4, 2])
-                col_id.markdown(f"**Nº Processo:** `{process['id']}`")
-                col_nome.markdown(f"**Partes:** {process['nome']}")
-                col_actions.button("🗑️ Apagar Permanentemente", key=f"delete_archived_{process['id']}", on_click=delete_process, args=(process['id'], True), help="APAGA O ARQUIVO JSON DO DISCO!")
+        for arquivo in arquivados:
+            caminho = os.path.join("data/arquivados", arquivo)
+            with open(caminho, "r", encoding="utf-8") as f:
+                dados = json.load(f)
+            processo_id = dados.get("numero_processo", arquivo.replace(".json", ""))
+            partes = f"{dados.get('autor', 'Autor')} x {dados.get('reu', 'Réu')}"
+            st.markdown(f"**Processo Arquivado:** `{processo_id}` — {partes}")
+            if st.button("🗑️ Apagar Permanentemente", key=f"delete_{processo_id}"):
+                os.remove(caminho)
+                st.success(f"Processo {processo_id} excluído permanentemente.")
+                st.rerun()
 else:
-    st.caption("A pasta de processos arquivados está vazia.")
+    st.caption("Nenhum processo arquivado encontrado.")

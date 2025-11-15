@@ -1,12 +1,10 @@
 import sqlite3
 import os
 
-# Caminho do banco de dados
-DB_PATH = "data/processos.db"
+DB_PATH = "processos.db"
 
 def init_db():
-    """Inicializa o banco de dados e cria a tabela se não existir."""
-    os.makedirs("data", exist_ok=True)
+    """Inicializa o banco de dados e cria a tabela se necessário."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -21,37 +19,37 @@ def init_db():
     conn.commit()
     conn.close()
 
+def listar_processos():
+    """Retorna todos os processos cadastrados."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, autor, reu, status, atualizado_em FROM processos")
+    processos = cursor.fetchall()
+    conn.close()
+    return processos
+
 def inserir_processo(id, autor, reu, status, atualizado_em):
-    """Insere ou atualiza um processo no banco."""
+    """Insere um novo processo no banco."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT OR REPLACE INTO processos (id, autor, reu, status, atualizado_em)
+        INSERT INTO processos (id, autor, reu, status, atualizado_em)
         VALUES (?, ?, ?, ?, ?)
     """, (id, autor, reu, status, atualizado_em))
     conn.commit()
     conn.close()
 
-def listar_processos():
-    """Retorna todos os processos como lista de tuplas."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM processos")
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
-
 def processo_existe(id):
-    """Verifica se um processo com o ID informado já existe."""
+    """Verifica se um processo já existe no banco."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM processos WHERE id = ?", (id,))
-    count = cursor.fetchone()[0]
+    existe = cursor.fetchone()[0] > 0
     conn.close()
-    return count > 0
+    return existe
 
 def excluir_processo(id):
-    """Exclui um processo do banco pelo ID."""
+    """Exclui um processo do banco."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM processos WHERE id = ?", (id,))
