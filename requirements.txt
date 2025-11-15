@@ -1,5 +1,6 @@
 streamlit
 python-docx
 num2words
-gspread # A biblioteca que faremos uso
-# Outras bibliotecas que você usa...
+gspread
+pandas
+gspread-dataframe  # <--- ADICIONE ESTA LINHA!
