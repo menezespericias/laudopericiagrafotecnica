@@ -7,255 +7,211 @@ import re
 from typing import List, Dict, Any 
 from io import BytesIO
 
-# --- FUNÇÕES DE UTILIDADE DE WORD DOCX ---
+# --- FUNÇÕES DE UTILIDADE (REFINADAS) ---
 
-# 1. FUNÇÃO AUXILIAR PARA INSERIR IMAGEM
-def inserir_imagem_em_paragrafo(paragrafo, file_obj, legenda: str = None, largura_maxima: float = 6.0):
-    """
-    Insere uma imagem a partir de um objeto de arquivo (UploadedFile do Streamlit) 
-    e ajusta sua largura máxima.
-    """
-    if not file_obj:
-        return
-
-    # O objeto file_obj (UploadedFile) contém os bytes da imagem
-    image_bytes = file_obj.getvalue()
-    
-    # Usa BytesIO para criar um stream de arquivo na memória, necessário para docx
-    image_stream = BytesIO(image_bytes)
-    
-    # Insere a imagem
-    paragrafo.add_run().add_picture(image_stream, width=Inches(largura_maxima))
-    
-    # Adiciona a legenda
-    if legenda:
-        paragrafo.add_run(f'\n{legenda}').bold = True
-    
-    # Alinha a imagem e a legenda ao centro
-    paragrafo.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-# 2. FUNÇÃO AUXILIAR PARA SUBSTITUIÇÃO EM PARÁGRAFOS
 def substituir_em_paragrafo(paragrafo, dados: dict):
-    """
-    Substitui os placeholders em um parágrafo mantendo a formatação original.
-    """
-    
     # Placeholders que serão tratados como LISTAS (não substituição simples)
-    LIST_PLACEHOLDERS = ["[AUTORES]", "[REUS]"] 
+    LIST_PLACEHOLDERS = ["AUTORES", "REUS"] 
     
     texto_original = paragrafo.text
     
-    # Verifica se o parágrafo contém placeholders de lista. Se sim, ignora a substituição de texto.
-    if any(lp in texto_original for lp in LIST_PLACEHOLDERS):
+    if any(f"[{lp}]" in texto_original for lp in LIST_PLACEHOLDERS):
         return
 
-    # FUNÇÃO INTERNA PARA PRESERVAR A FORMATAÇÃO
-    def replace_match(match):
-        placeholder = match.group(0)
-        chave = placeholder[1:-1] # Remove []
+    for chave, valor in dados.items():
+        # Trata chaves com espaço, convertendo-as para a notação de placeholder do template
+        placeholder = f"[{chave.upper().replace(' ', '_')}]" 
         
-        if chave in dados:
-            valor = dados[chave]
-            # Formatação de datas
-            if isinstance(valor, date):
-                valor_str = valor.strftime("%d/%m/%Y")
-            else:
-                valor_str = str(valor)
+        if placeholder in texto_original:
+            # Substitui placeholders de FLS. com o mesmo texto (Ex: [NUMEROS] em 1. Apresentação)
+            if chave.upper() == 'ID_NOMEACAO_FLS':
+                texto_original = texto_original.replace("[NUMEROS]", str(valor))
+                paragrafo.text = texto_original # Atualiza o parágrafo antes de quebrar para run
                 
-            return valor_str
-        else:
-            return placeholder
-
-    # Padrão regex para encontrar [QUALQUER_COISA]
-    padrao = re.compile(r'\[[A-Z0-9_]+\]')
-    
-    # Aplica a substituição run por run para manter a formatação (mais complexo, usando re.sub)
-    # A maneira mais robusta no python-docx é através da manipulação dos runs,
-    # mas a forma abaixo substitui no texto e exige re-aplicar a formatação,
-    # vamos usar uma abordagem simplificada (substituir no texto e torcer para o docx ser indulgente):
-    
-    # Esta abordagem simples pode quebrar a formatação se o placeholder estiver em vários runs.
-    # Usaremos a abordagem mais robusta em docx que é a manipuição dos runs (como já estava no seu código original).
-    # O código abaixo é a implementação robusta que você tinha, ligeiramente ajustada:
-    
-    for run in paragrafo.runs:
-        texto_run = run.text
-        
-        # Cria uma função de substituição para usar com regex (para evitar múltiplas iterações)
-        def _substituir(texto):
-            for chave, valor in dados.items():
-                placeholder = f"[{chave.upper()}]"
-                
-                if isinstance(valor, list): # Ignora listas
-                    continue
-                
-                # Trata a data para formatação
-                valor_str = str(valor)
-                if isinstance(valor, date):
-                    valor_str = valor.strftime("%d/%m/%Y")
-
-                texto = texto.replace(placeholder, valor_str)
-            return texto
-
-        novo_texto_run = _substituir(texto_run)
-        
-        if novo_texto_run != texto_run:
-            run.text = novo_texto_run
-
-
-# 3. FUNÇÃO AUXILIAR DE SUBSTITUIÇÃO EM TABELAS
+            valor_str = str(valor) if not isinstance(valor, list) else ""
+            
+            if valor_str:
+                for run in paragrafo.runs:
+                    if placeholder in run.text:
+                        run.text = run.text.replace(placeholder, valor_str)
+                        
 def substituir_em_tabela(tabela, dados: dict):
-    """Substitui placeholders em todas as células da tabela."""
     for row in tabela.rows:
         for cell in row.cells:
             for paragrafo in cell.paragraphs:
                 substituir_em_paragrafo(paragrafo, dados)
 
-
-# 4. FUNÇÃO PARA INSERIR LISTA (Como Parágrafos)
-def inserir_lista_no_paragrafo(doc, marcador, lista):
-    """
-    Localiza o placeholder do marcador no documento e o substitui por itens da lista
-    como novos parágrafos formatados com uma lista simples (Bullet Points).
-    """
-    placeholder = f"[{marcador}]"
+def inserir_lista_no_paragrafo(doc, marcador, lista: List[str]):
+    placeholder = f"[{marcador.upper()}]"
     
-    # Se a lista vier como string com quebras de linha
-    if isinstance(lista, str) and "\n" in lista:
-        lista = [item.strip() for item in lista.split("\n") if item.strip()]
-    elif not isinstance(lista, list):
-        return # Não é uma lista válida
-
-    for i, paragrafo in enumerate(doc.paragraphs):
-        if placeholder in paragrafo.text:
-            
-            # Divide o parágrafo em partes antes, placeholder e depois
-            partes = paragrafo.text.split(placeholder, 1)
-            
-            # Se houver texto antes ou depois do placeholder, mantém no parágrafo original
-            if partes[0] or partes[1]:
-                paragrafo.text = partes[0] + partes[1]
-            else:
-                paragrafo.text = "" # Limpa o parágrafo se só tinha o placeholder
-            
-            if not lista:
-                return
-
-            # Adiciona os novos itens da lista *antes* do parágrafo que continha o placeholder
-            for item in lista:
-                # O novo parágrafo deve ser inserido ANTES do parágrafo atual (paragrafo)
-                novo_paragrafo = paragrafo.insert_paragraph_before(item)
-                
-                try:
-                    # Tenta aplicar estilo de Bullet Point (se existir no modelo)
-                    novo_paragrafo.style = 'List Bullet' 
-                except KeyError:
-                    pass 
-            
-            return # Sai assim que substituir o primeiro (e único) placeholder
-
-# 5. FUNÇÃO PARA INSERIR IMAGENS EM SEÇÃO DE ANEXOS/ADENDOS
-def inserir_imagens_em_secao(doc, titulo_secao: str, imagens: List[Dict[str, Any]], prefixo_legenda: str):
-    """
-    Insere uma nova seção (título) e todas as imagens da lista.
-    """
-    
-    if not imagens:
+    if not isinstance(lista, list) or not lista:
         return
 
-    # Adiciona um título para a seção
-    doc.add_heading(titulo_secao, level=1)
-    
-    for item in imagens:
-        file_obj = item.get('imagem_obj')
-        legenda_base = item.get('legenda') or item.get('descricao') or f"{prefixo_legenda} {item.get('id', '')}"
+    for paragrafo in doc.paragraphs:
+        if placeholder in paragrafo.text:
+            
+            paragrafo.text = paragrafo.text.replace(placeholder, "")
+            
+            for item in lista:
+                # Insere o item como um novo parágrafo antes do placeholder
+                novo_paragrafo = paragrafo.insert_paragraph_before(f"- {item}")
+                
+            return
+
+def inserir_imagens_em_secao(doc: Document, titulo: str, adendos: List[Dict[str, Any]], prefixo: str):
+    """Insere o título da seção e as imagens dos adendos."""
+    if not adendos:
+        return
         
-        # Apenas insere se o objeto de arquivo for válido (UploadedFile tem o atributo 'name')
-        if file_obj and hasattr(file_obj, 'name'):
-            
-            # Título/legenda completa (Ex: Adendo 1 - Nome da figura)
-            legenda_completa = f"{prefixo_legenda} {item['id']}: {legenda_base}"
-            
-            # Adiciona um novo parágrafo para a imagem
-            paragrafo_imagem = doc.add_paragraph()
-            
-            # Insere a imagem e a legenda
-            # Usando uma largura de 6.0 polegadas como padrão (quase a largura total da página)
-            inserir_imagem_em_paragrafo(paragrafo_imagem, file_obj, legenda=legenda_completa, largura_maxima=6.0)
-            
-            # Adiciona uma quebra de página, se for o último item do laudo (opcional)
-            # doc.add_page_break()
+    doc.add_heading(titulo, level=2)
+    
+    for i, adendo in enumerate(adendos):
+        legenda = adendo.get("legenda", f"{prefixo} {i+1}")
+        file_obj = adendo.get("imagem_obj")
+        
+        if file_obj:
+            try:
+                # Insere a imagem
+                doc.add_picture(file_obj, width=Inches(6))
+                
+                # Adiciona a legenda
+                doc.add_paragraph(legenda, style='Caption') 
+                
+            except Exception as e:
+                # Em caso de erro com a imagem (pode ocorrer se o objeto não for mais válido)
+                doc.add_paragraph(f"ERRO: Não foi possível inserir a imagem: {legenda}. {e}")
+
+# --- FUNÇÕES DE GERAÇÃO DE CONTEÚDO DINÂMICO ---
+
+def gerar_bloco_documentos_questionados(doc: Document, dados: dict):
+    """Gera a lista de Documentos Questionados (4.1) no corpo do laudo, substituindo os placeholders 0 a 5."""
+    docs = dados.get('DOCUMENTOS_QUESTIONADOS', [])
+    
+    for i in range(6):
+        placeholder_tipo = f"[TIPO_DOCUMENTO_{i}]"
+        placeholder_num = f"[NÚMERO DO CONTRATO_{i}]"
+        placeholder_data = f"[DATA_DOCUMENTO_{i}]" if i == 0 else f"[DATA_{i}]"
+        placeholder_fls = f"[FLS_DOCUMENTOS_{i}]" if i == 0 else f"[NÚMEROS DAS FOLHAS_{i}]"
+        
+        texto_doc = ""
+        if i < len(docs):
+            d = docs[i]
+            texto_doc = f"{d['tipo']}, nº {d['numero']}, datado de {d['data']}, fls. {d['fls']}."
+        
+        # Procura e substitui todos os placeholders para este documento
+        for paragrafo in doc.paragraphs:
+            if placeholder_tipo in paragrafo.text:
+                if texto_doc:
+                    # Tenta substituir o bloco completo (Documento X: [TIPO_DOCUMENTO_X]...)
+                    padrao_completo = re.compile(r"Documento\s+" + str(i+1) + r":\s*" + re.escape(placeholder_tipo) + r"(.*)")
+                    if padrao_completo.search(paragrafo.text):
+                        paragrafo.text = re.sub(padrao_completo, f"Documento {i+1}: {texto_doc}", paragrafo.text)
+                    else:
+                        paragrafo.text = paragrafo.text.replace(placeholder_tipo, d['tipo'])
+                        paragrafo.text = paragrafo.text.replace(placeholder_num, d['numero'])
+                        paragrafo.text = paragrafo.text.replace(placeholder_data, d['data'])
+                        paragrafo.text = paragrafo.text.replace(placeholder_fls, d['fls'])
+                else:
+                    # Remove a linha se não houver documento
+                    paragrafo.text = "" 
+
+def gerar_bloco_padroes_encontrados(doc: Document, dados: dict):
+    """Gera a lista de Padrões Encontrados nos Autos (4.2.B)."""
+    placeholder_base = "[TIPO_DOCUMENTO] – Fls. [NÚMEROS], datado de [DATA]."
+    padroes = dados.get('PADROES_ENCONTRADOS', [])
+    
+    # Encontra o parágrafo que contém o placeholder do Documento 1 em 4.2.B
+    paragrafo_encontrado = None
+    paragrafos_a_remover = []
+    
+    for p in doc.paragraphs:
+        if "Documento 1:" in p.text and placeholder_base in p.text:
+            paragrafo_encontrado = p
+            paragrafos_a_remover.append(p)
+        elif "Documento 2:" in p.text and placeholder_base in p.text:
+            paragrafos_a_remover.append(p)
+
+    if not paragrafo_encontrado:
+        return
+
+    # Remove os parágrafos de Documento 2 e 3 (se existirem)
+    for p_rem in paragrafos_a_remover[1:]:
+        p_rem.text = ""
+
+    for i, p in enumerate(padroes):
+        texto_padrao = f"Documento {i+1}: {p['tipo']} – Fls. {p['fls']}, datado de {p['data']}."
+        
+        if i == 0:
+            paragrafo_encontrado.text = texto_padrao
+        else:
+            paragrafo_encontrado.insert_paragraph_before(texto_padrao)
 
 
-# 6. FUNÇÃO PRINCIPAL DE GERAÇÃO
+# --- FUNÇÃO PRINCIPAL DE GERAÇÃO ---
+
 def gerar_laudo(
     caminho_modelo: str, 
     caminho_saida: str, 
     dados: dict, 
-    anexos: List[Dict[str, Any]], 
-    adendos: List[Dict[str, Any]], 
-    quesito_images_list: List[Dict[str, Any]]
+    adendos: List[Dict[str, Any]] # Para o Bloco 6
 ):
-    """Função principal que coordena a geração do documento DOCX."""
+    
     doc = Document(caminho_modelo)
+        
+    # --- 1. Pré-Cálculos e Extensos ---
     
-    # 1. ADICIONAR VERSÕES POR EXTENSO (para uso automático)
-    
-    # Adiciona 'EXTENSO' para NUM_EXAMES
-    if "NUM_EXAMES" in dados and isinstance(dados["NUM_EXAMES"], str) and dados["NUM_EXAMES"].isdigit():
-        num = int(dados["NUM_EXAMES"])
-        dados["NUM_EXAMES_EXTENSO"] = num2words(num, lang='pt_BR').upper() 
-    
-    # NOVO: Adiciona 'EXTENSO' para NUM_PECA_AUTENTICIDADE
-    if "NUM_PECA_AUTENTICIDADE" in dados and isinstance(dados["NUM_PECA_AUTENTICIDADE"], str) and dados["NUM_PECA_AUTENTICIDADE"].isdigit():
-        num = int(dados["NUM_PECA_AUTENTICIDADE"])
-        dados["NUM_PECA_AUTENTICIDADE_EXTENSO"] = num2words(num, lang='pt_BR').upper() 
+    # Cálculos para campos por extenso
+    for campo in ["NUM_ESPECIMES", "NUM_LAUDAS"]:
+        if dados.get(campo) and isinstance(dados[campo], str) and dados[campo].isdigit():
+            num = int(dados[campo])
+            dados[f"{campo}_EXTENSO"] = num2words(num, lang='pt_BR').upper() 
+        else:
+            dados[f"{campo}_EXTENSO"] = ""
 
-    # NOVO: Adiciona 'EXTENSO' para NUM_PECA_QUESTIONADA
-    if "NUM_PECA_QUESTIONADA" in dados and isinstance(dados["NUM_PECA_QUESTIONADA"], str) and dados["NUM_PECA_QUESTIONADA"].isdigit():
-        num = int(dados["NUM_PECA_QUESTIONADA"])
-        dados["NUM_PECA_QUESTIONADA_EXTENSO"] = num2words(num, lang='pt_BR').upper() 
-
+    # Campos de texto livre que viram lista
+    dados['AUTORES'] = [a.strip() for a in dados.get('autor', '').split('\n') if a.strip()]
+    dados['REUS'] = [r.strip() for r in dados.get('reu', '').split('\n') if r.strip()]
     
-    # 2. SUBSTITUIÇÃO DE CAMPOS DE TEXTO E LISTAS
+    # Define os primeiros nomes e substitui placeholders de nome no dicionário para substituição simples
+    dados['PRIMEIRO_AUTOR'] = dados['AUTORES'][0] if dados['AUTORES'] else "Autor(a) Não Informado(a)"
+    dados['NOME COMPLETO DO RÉU'] = dados['REUS'][0] if dados['REUS'] else "Réu Não Informado"
+    dados['NOME DO AUTOR'] = dados['PRIMEIRO_AUTOR']
+    dados['NOME COMPLETO DO PERITO'] = dados.get('PERITO', '')
+    dados['NÚMERO DE REGISTRO'] = dados.get('NUMERO_REGISTRO', '')
+
+    # --- 2. Geração de Blocos Dinâmicos de Texto ---
+    
+    # Conclusão Dinâmica
+    dados['BLOCO_CONCLUSAO_DINAMICO'] = gerar_bloco_conclusao_dinamico(dados)
+    
+    # Respostas aos Quesitos
+    dados['BLOCO_QUESITOS_AUTOR'] = gerar_bloco_respostas_quesitos(dados, 'Autor')
+    dados['BLOCO_QUESITOS_REU'] = gerar_bloco_respostas_quesitos(dados, 'Réu')
+    
+    # --- 3. Substituição em Parágrafos e Tabelas (Geral) ---
+    
     for paragrafo in doc.paragraphs:
         
-        # Tenta inserir a lista de Autores/Réus onde o placeholder estiver
-        if "[AUTORES]" in paragrafo.text and 'AUTORES' in dados:
-            inserir_lista_no_paragrafo(doc, "AUTORES", dados['AUTORES'])
-            
-        elif "[REUS]" in paragrafo.text and 'REUS' in dados:
-            inserir_lista_no_paragrafo(doc, "REUS", dados['REUS'])
-            
-        elif "[QUESITOS_AUTOR]" in paragrafo.text and 'quesitos_autor' in dados:
-             # Formata a lista de quesitos (ex: "1. Texto do quesito")
-            lista_quesitos = [f"{q['id']}. {q['texto']}" for q in dados['quesitos_autor']]
-            inserir_lista_no_paragrafo(doc, "QUESITOS_AUTOR", lista_quesitos)
+        # 3.1. Substituição do cabeçalho (Resumo)
+        if "[NUMERO DO PROCESSO]Autor: [nome do autor]Réu: [nome do réu]" in paragrafo.text:
+            texto_resumo = f"{dados.get('numero_processo', '')} Autor: {dados.get('PRIMEIRO_AUTOR', '')} Réu: {dados.get('NOME COMPLETO DO RÉU', '')}"
+            paragrafo.text = paragrafo.text.replace(f"Processo: [NUMERO DO PROCESSO]Autor: [nome do autor]Réu: [nome do réu]", f"Processo: {texto_resumo}")
+        
+        # 3.2. Substituição de campos simples (inclui os novos: VARA, NUMERO_REGISTRO, NUM_ESPECIMES, etc.)
+        substituir_em_paragrafo(paragrafo, dados)
 
-        elif "[QUESITOS_REU]" in paragrafo.text and 'quesitos_reu' in dados:
-            lista_quesitos = [f"{q['id']}. {q['texto']}" for q in dados['quesitos_reu']]
-            inserir_lista_no_paragrafo(doc, "QUESITOS_REU", lista_quesitos)
-            
-        else:
-            # Para os demais placeholders
-            substituir_em_paragrafo(paragrafo, dados)
-
-    # 3. SUBSTITUIÇÃO DE CAMPOS EM TABELAS
     for tabela in doc.tables:
         substituir_em_tabela(tabela, dados)
-        
-    # 4. INSERÇÃO DE IMAGENS DENTRO DO LAUDO (Adendos e Ilustrações)
-    # Insere as imagens após o último parágrafo, ou onde você desejar.
-    inserir_imagens_em_secao(doc, "ADENDOS GRÁFICOS E ILUSTRAÇÕES", adendos, "Adendo/Figura")
-    
-    # 5. INSERÇÃO DE IMAGENS DE QUESITOS E ANEXOS (Geralmente no final)
-    # Quesitos (imagens dos documentos de quesitos)
-    if quesito_images_list:
-        inserir_imagens_em_secao(doc, "IMAGENS DE QUESITOS", quesito_images_list, "Quesito")
-    
-    # Anexos (imagens dos documentos anexados)
-    if anexos:
-        inserir_imagens_em_secao(doc, "ANEXOS E DOCUMENTOS", anexos, "Anexo")
 
-    # 6. SALVAR DOCUMENTO
+    # --- 4. Inserção de Listas e Conteúdo Estruturado ---
+    
+    # 4.1. Inserção dos Documentos Questionados (4.1)
+    gerar_bloco_documentos_questionados(doc, dados)
+    
+    # 4.2. Inserção dos Padrões Encontrados (4.2.B)
+    gerar_bloco_padroes_encontrados(doc, dados)
+
+    # 4.3. Inserção de Adendos Gráficos (Bloco 6)
+    inserir_imagens_em_secao(doc, "6. ADENDOS GRÁFICOS", adendos, "Adendo")
+
     doc.save(caminho_saida)
