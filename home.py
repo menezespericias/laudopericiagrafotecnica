@@ -87,7 +87,9 @@ if arquivos:
         st.markdown(f"**Etapas concluídas:** {len(etapas)}")
         col1, col2 = st.columns(2)
         with col1:
-            st.page_link("pages/01_Gerar_laudo.py", label="✏️ Continuar Edição", icon="▶️")
+            if st.button("✏️ Continuar Edição", key=f"editar_{processo_id}"):
+                st.session_state["process_to_load"] = processo_id
+                st.switch_page("pages/01_Gerar_laudo.py")
         with col2:
             if st.button("📁 Arquivar", key=f"arquivar_{processo_id}"):
                 os.makedirs("data/arquivados", exist_ok=True)
