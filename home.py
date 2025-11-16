@@ -4,17 +4,25 @@ import json
 import shutil
 import pandas as pd
 from datetime import datetime
-from db_handler import (
+# NOVO: Ajuste a importação para a nova estrutura de pastas 'src'
+from src.db_handler import (
     init_db,
     listar_processos,
     inserir_processo,
     processo_existe,
     excluir_processo,
-    atualizar_status # NOVO: Importa a função de atualização
+    atualizar_status
 )
 
 # --- Configuração Inicial ---
 st.set_page_config(page_title="Início", layout="wide")
+
+# CORREÇÃO CRÍTICA DO PATH: Garante o caminho absoluto para as pastas de dados
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = SCRIPT_DIR # home.py está na raiz, então o root é a própria pasta
+DATA_FOLDER = os.path.join(PROJECT_ROOT, "data")
+os.makedirs(DATA_FOLDER, exist_ok=True) 
+
 init_db() # Garante que o banco de dados está inicializado
 
 st.title("Bem-vindo ao Gerador de Laudos")
@@ -37,112 +45,96 @@ with st.expander("➕ Adicionar Novo Processo"):
                 st.warning("Este número de processo já está cadastrado.")
             else:
                 atualizado_em = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-                
-                # 1. Insere o registro no Banco de Dados (SQLite)
-                inserir_processo(novo_id, novo_autor, novo_reu, novo_status, atualizado_em)
-                
-                # 2. Cria o arquivo JSON inicial na pasta 'data'
-                # NOTA: O arquivo JSON é apenas um cache de dados, a informação principal está no DB
-                data_folder = "data"
-                os.makedirs(data_folder, exist_ok=True)
-                json_path = os.path.join(data_folder, f"{novo_id}.json")
-
-                dados_iniciais = {
-                    "numero_processo": novo_id,
-                    "autor": novo_autor,
-                    "reu": novo_reu,
-                    "status_db": novo_status, # Armazena o status também no JSON (para referência)
-                    "DATA_LAUDO": datetime.now().strftime("%d/%m/%Y")
-                    # Outros campos iniciais podem ser adicionados aqui
-                }
-                
-                with open(json_path, "w", encoding="utf-8") as f:
-                    json.dump(dados_iniciais, f, ensure_ascii=False, indent=4)
-                
-                st.success(f"Processo **{novo_id}** criado e salvo com sucesso!")
-                st.rerun()
+                try:
+                    inserir_processo(novo_id, novo_autor, novo_reu, novo_status, atualizado_em)
+                    st.success(f"✅ Processo **{novo_id}** cadastrado com sucesso!")
+                    # Cria o arquivo JSON básico para evitar erro de arquivo não encontrado
+                    json_path = os.path.join(DATA_FOLDER, f"{novo_id}.json")
+                    with open(json_path, "w", encoding="utf-8") as f:
+                        json.dump({
+                            "NUMERO_PROCESSO": novo_id,
+                            "AUTORES": novo_autor,
+                            "REUS": novo_reu,
+                            "status": novo_status,
+                            "atualizado_em": atualizado_em,
+                            "etapas_concluidas": list() # Inicializa como lista para salvar corretamente no JSON
+                        }, f)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Erro ao salvar no banco de dados: {e}")
 
 st.markdown("---")
 
-# --- LISTAGEM DE PROCESSOS (Baseado no DB) ---
-
-# 1. Busca todos os processos no banco de dados
-try:
-    todos_processos = listar_processos()
-    # O resultado de listar_processos é uma lista de tuplas: (id, autor, reu, status, atualizado_em)
-except Exception as e:
-    st.error(f"Erro ao carregar processos do banco de dados: {e}")
-    todos_processos = []
-
-# 2. Filtragem de dados
-PROCESSOS_ATIVOS = ['Em andamento', 'Laudo Preliminar']
-PROCESSOS_ARQUIVADOS = ['Arquivado', 'Concluído']
-
-# status está no índice [3]
-processos_ativos = [p for p in todos_processos if p[3] in PROCESSOS_ATIVOS]
-processos_arquivados = [p for p in todos_processos if p[3] in PROCESSOS_ARQUIVADOS]
-
-# --- Processos Ativos ---
+# --- Processos Ativos (Lidos do DB) ---
 st.header("Processos Ativos")
+# Filtrar apenas processos que não estão 'Arquivado' para mostrar aqui
+processos_ativos_db = [
+    p for p in listar_processos() 
+    if p[3] != 'Arquivado' and p[3] != 'Concluído'
+]
 
-if processos_ativos:
-    # Cria um DataFrame para exibir a lista em formato de tabela
-    df_ativos = pd.DataFrame(processos_ativos, columns=['id', 'autor', 'reu', 'status', 'atualizado_em'])
+if processos_ativos_db:
+    # Cria um DataFrame para facilitar a visualização
+    df_processos = pd.DataFrame(processos_ativos_db, columns=["id", "autor", "reu", "status", "atualizado_em"])
 
-    # Exibe a tabela (opcional, pode ser substituído pela lista abaixo)
-    st.dataframe(df_ativos, hide_index=True, use_container_width=True)
-
-    # Lista detalhada para botões de ação
-    for index, row in df_ativos.iterrows():
+    for index, row in df_processos.iterrows():
         processo_id = row['id']
         
-        # Cria um container para cada item com botões
         with st.container(border=True):
-            col1, col2, col3 = st.columns([5, 2, 2])
+            col1, col2, col3, col4 = st.columns([4, 2, 2, 2])
             
             with col1:
                 st.markdown(f"**Nº:** `{processo_id}`")
                 st.markdown(f"**Partes:** {row['autor']} x {row['reu']}")
-                st.caption(f"Status: **{row['status']}** | Última atualização: {row['atualizado_em']}")
-
+                st.caption(f"Status: **{row['status']}** | Última Atualização: {row['atualizado_em']}")
+            
             with col2:
-                # Botão para continuar a edição
-                if st.button("✏️ Continuar Edição", key=f"continuar_{processo_id}", type="primary"):
+                # Botão para EDITAR/CARREGAR
+                if st.button("▶️ Carregar para Edição", key=f"editar_{processo_id}", type="primary"):
+                    # Define a variável de estado para a outra página carregar
                     st.session_state["process_to_load"] = processo_id
-                    # Redireciona para a página de edição
                     st.switch_page("pages/01_Gerar_laudo.py")
-
+            
             with col3:
-                # Botão para arquivar
-                if st.button("📁 Arquivar", key=f"arquivar_{processo_id}"):
-                    # Atualiza o status no DB para 'Arquivado'
+                # Botão para ARQUIVAR (muda o status no DB)
+                if st.button("📁 Arquivar", key=f"arquivar_{processo_id}", type="secondary"):
                     atualizar_status(processo_id, 'Arquivado')
-                    st.success(f"Processo {processo_id} arquivado.")
+                    st.success(f"Processo {processo_id} arquivado. Consulte em 'Processos Finalizados'.")
+                    st.rerun()
+
+            with col4:
+                # Botão para CONCLUIR (muda o status no DB, diferente de arquivar)
+                if st.button("✔️ Concluído", key=f"concluir_{processo_id}"):
+                    atualizar_status(processo_id, 'Concluído')
+                    st.success(f"Processo {processo_id} marcado como Concluído.")
                     st.rerun()
 else:
-    st.info("Nenhum processo ativo encontrado no momento.")
+    st.info("Nenhum processo ativo encontrado. Adicione um novo processo acima.")
 
 st.markdown("---")
 
-# --- Processos Arquivados ---
-st.header("Processos Arquivados")
+# --- Processos Finalizados (Arquivados e Concluídos) ---
+st.header("Processos Finalizados")
 
-if processos_arquivados:
-    with st.expander(f"Mostrar {len(processos_arquivados)} Processos Arquivados"):
-        # Cria um DataFrame para exibir a lista
-        df_arquivados = pd.DataFrame(processos_arquivados, columns=['id', 'autor', 'reu', 'status', 'atualizado_em'])
-        st.dataframe(df_arquivados, hide_index=True, use_container_width=True)
-        
-        for index, row in df_arquivados.iterrows():
+processos_finalizados_db = [
+    p for p in listar_processos() 
+    if p[3] == 'Arquivado' or p[3] == 'Concluído'
+]
+
+if processos_finalizados_db:
+    df_finalizados = pd.DataFrame(processos_finalizados_db, columns=["id", "autor", "reu", "status", "atualizado_em"])
+    
+    with st.expander("Mostrar Processos Finalizados"):
+        for index, row in df_finalizados.iterrows():
             processo_id = row['id']
             
             with st.container(border=True):
-                col1, col2, col3 = st.columns([5, 2, 2])
+                col1, col2, col3 = st.columns([6, 2, 2])
                 
                 with col1:
                     st.markdown(f"**Nº:** `{processo_id}`")
                     st.markdown(f"**Partes:** {row['autor']} x {row['reu']}")
-                    st.caption(f"Status: **{row['status']}** | Arquivado em: {row['atualizado_em']}")
+                    st.caption(f"Status: **{row['status']}** | Finalizado em: {row['atualizado_em']}")
                 
                 with col2:
                     if st.button("📂 Desarquivar", key=f"desarquivar_{processo_id}", type="secondary"):
@@ -156,11 +148,10 @@ if processos_arquivados:
                         # Exclui do DB
                         excluir_processo(processo_id)
                         # Remove o arquivo JSON também
-                        json_path = os.path.join("data", f"{processo_id}.json")
+                        json_path = os.path.join(DATA_FOLDER, f"{processo_id}.json")
                         if os.path.exists(json_path):
                             os.remove(json_path)
                         st.success(f"Processo {processo_id} excluído permanentemente.")
                         st.rerun()
-
 else:
-    st.info("Nenhum processo arquivado encontrado.")
+    st.info("Nenhum processo finalizado ou arquivado encontrado.")
