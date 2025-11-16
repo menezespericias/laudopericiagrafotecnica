@@ -253,283 +253,157 @@ def format_process_label(process_id: str) -> str:
 
 
 # ======================================================================
-# PARTE 2/4 - Auxiliares de Análise, Formulários e Render de Documentos
+# PARTE 2 — EDITOR DE IMAGEM, FUNÇÕES DE ANÁLISE E GRÁFICO EOG
 # ======================================================================
 
-# ----------------------------------------------------------------------
-# Auxiliares: criar/recuperar análises, processar quesitos em adendos
-# ----------------------------------------------------------------------
+from typing import Dict, List, Any, Optional
+from PIL import Image
+from io import BytesIO
+import matplotlib.pyplot as plt
+from streamlit_drawable_canvas import st_canvas
+from streamlit_cropper import st_cropper
+import streamlit as st
+import uuid
+
+# ======================================================================
+# 2.1 — Funções auxiliares de análise
+# ======================================================================
+
 def get_analysis_for_questionado(questionado_id: str) -> Dict[str, Any]:
     """
-    Retorna a análise vinculada a um documento questionado.
-    Se não existir, cria uma estrutura padrão e registra em saved_analyses.
+    Recupera a análise salva do questionado.
+    Retorna um dicionário com campos de EOG, imagens, texto, etc.
     """
     saved = st.session_state.get("saved_analyses", {})
-    if questionado_id in saved:
-        return saved[questionado_id]
-
-    new_analysis = {
-        "id": gerar_id(),
-        "questionado_id": questionado_id,
-        "is_saved": False,
-        "conclusao_status": "PENDENTE",
-        "eog_elements": {k: "PENDENTE" for k in EOG_ELEMENTS.keys()},
-        "confronto_texts": {k: "" for k in CONFRONTO_ELEMENTS.keys()},
-        "descricao_analise": "",
-        "imagem_analise_bytes": None,
-        "tem_imagem_analise": False,
-        "justificativa_conclusao": ""
-    }
-    st.session_state.saved_analyses[questionado_id] = new_analysis
-    return new_analysis
+    return saved.get(questionado_id, {})
 
 
-def remove_analysis_for_questionado(questionado_id: str):
+def save_analysis_for_questionado(questionado_id: str, analysis: Dict[str, Any]):
+    """
+    Salva a análise de um questionado dentro do session_state.
+    """
     saved = st.session_state.get("saved_analyses", {})
-    if questionado_id in saved:
-        saved.pop(questionado_id)
-        st.session_state.saved_analyses = saved
-        save_current_state({"saved_analyses": st.session_state.saved_analyses})
+    saved[questionado_id] = analysis
+    st.session_state["saved_analyses"] = saved
 
 
-def process_quesitos_for_adendos(quesitos_list: List[Dict[str, Any]], party_name: str):
+# ======================================================================
+# 2.2 — EDITOR DE IMAGEM (Mesa Gráfica)
+# ======================================================================
+
+def image_editor_tool(image_bytes: bytes) -> Optional[bytes]:
     """
-    Transforma imagens em quesitos em adendos e vincula ao session_state.adendos.
+    Editor completo de imagem:
+    - Crop
+    - Zoom
+    - Desenho livre
+    - Linhas, setas e anotações
+    Retorna a imagem final editada como bytes PNG.
     """
-    adendos = st.session_state.get("adendos", [])
-    for q in list(quesitos_list):
-        if q.get("imagem_bytes") and not q.get("adendo_id"):
-            ad_id = gerar_id()
-            ad = {
-                "id_adendo": ad_id,
-                "origem": f"quesito_{party_name.lower()}",
-                "id_referencia": q.get("id"),
-                "descricao": f"Quesito {party_name} #{q.get('id')}",
-                "bytes": q.get("imagem_bytes"),
-                "filename": f"quesito_{party_name.lower()}_{ad_id}.png"
-            }
-            adendos.append(ad)
-            q["adendo_id"] = ad_id
-            q.pop("imagem_bytes", None)
-    st.session_state.adendos = adendos
-    save_current_state({"adendos": adendos})
+
+    st.subheader("🖼️ Editor de Imagem — Mesa Gráfica")
+
+    # Carrega imagem original
+    img = Image.open(BytesIO(image_bytes))
+
+    # 1) CROPPER --------------------------------------------------------
+    st.write("### 1) Recortar imagem")
+    cropped = st_cropper(
+        img,
+        realtime_update=True,
+        box_color="#ff0000",
+        aspect_ratio=None,
+        key=f"crop_{uuid.uuid4()}"
+    )
+
+    st.write("Imagem recortada:")
+    st.image(cropped, use_column_width=True)
+
+    # 2) CANVAS ---------------------------------------------------------
+    st.write("### 2) Anotar imagem")
+    canvas_result = st_canvas(
+        fill_color="rgba(255, 0, 0, 0.3)",
+        stroke_color="#0000ff",
+        stroke_width=2,
+        background_image=cropped,
+        update_streamlit=True,
+        height=450,
+        width=700,
+        drawing_mode="freedraw",
+        key=f"canvas_{uuid.uuid4()}"
+    )
+
+    # 3) EXPORTAÇÃO -----------------------------------------------------
+
+    if canvas_result.image_data is not None:
+        final_img = Image.fromarray(canvas_result.image_data.astype("uint8"))
+        st.write("### 3) Resultado final")
+        st.image(final_img, use_column_width=True)
+
+        buffer = BytesIO()
+        final_img.save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    return None
 
 
-# ----------------------------------------------------------------------
-# Render de formulários menores (Questionados / Padrões / Anexos)
-# ----------------------------------------------------------------------
-def render_questionado_form(item: Dict[str, Any], idx: int):
+# ======================================================================
+# 2.3 — GRÁFICO RADAR PARA EOG
+# ======================================================================
+
+def plot_eog_radar(eog_data: Dict[str, str]):
     """
-    Renderiza o formulário de um documento questionado (utilizado na Etapa 4).
+    Gera o gráfico Radar dos Elementos de Ordem Geral (EOG).
+    Cada EOG possui um valor numérico definido no dicionário EOG_OPCOES_RADAR.
     """
-    item_id = item.get("id")
-    with st.expander(f"Documento Questionado {idx+1} — {item.get('TIPO_DOCUMENTO', '')}", expanded=False):
-        col1, col2 = st.columns([3,1])
-        item["TIPO_DOCUMENTO"] = col1.text_input("Tipo do Documento", value=item.get("TIPO_DOCUMENTO", ""), key=f"q_tipo_{item_id}")
-        item["FLS_DOCUMENTOS"] = col2.text_input("Fls.", value=item.get("FLS_DOCUMENTOS", ""), key=f"q_fls_{item_id}")
-        item["DESCRICAO_IMAGEM"] = st.text_area("Descrição do Grafismo", value=item.get("DESCRICAO_IMAGEM", ""), key=f"q_desc_{item_id}", height=80)
 
-        col_save, col_del = st.columns([4,1])
-        if col_save.button("💾 Salvar Documento", key=f"save_q_{item_id}"):
-            # atualiza lista no session_state e salva
-            lst = st.session_state.get("questionados_list", [])
-            for i, it in enumerate(lst):
-                if it.get("id") == item_id:
-                    lst[i] = item
-                    break
-            st.session_state.questionados_list = lst
-            save_current_state({"questionados_list": lst})
-            st.success("Documento salvo.")
-        if col_del.button("🗑️ Excluir Documento", key=f"del_q_{item_id}"):
-            st.session_state.questionados_list = [x for x in st.session_state.questionados_list if x.get("id") != item_id]
-            # remove análise vinculada
-            if item_id in st.session_state.get("saved_analyses", {}):
-                st.session_state.saved_analyses.pop(item_id)
-            save_current_state({"questionados_list": st.session_state.get("questionados_list", []), "saved_analyses": st.session_state.get("saved_analyses", {})})
-            st.success("Documento removido.")
-            st.experimental_rerun()
+    ordered_keys = [
+        "HABILIDADE_VELOCIDADE",
+        "ESPONTANEIDADE_DINAMISMO",
+        "CALIBRE",
+        "ALINHAMENTO_GRAFICO",
+        "ATAQUES_REMATES"
+    ]
 
+    # Cria lista de valores convertidos (0,1,2)
+    values = [
+        EOG_OPCOES_RADAR.get(eog_data.get(k, "PENDENTE"), 1)
+        for k in ordered_keys
+    ]
+    values.append(values[0])
 
-def render_padrao_form(item: Dict[str, Any], idx: int):
-    item_id = item.get("id")
-    with st.expander(f"Documento Padrão {idx+1} — {item.get('TIPO_DOCUMENTO','')}", expanded=False):
-        item["TIPO_DOCUMENTO"] = st.text_input("Tipo do Documento Padrão", value=item.get("TIPO_DOCUMENTO", ""), key=f"pad_tipo_{item_id}")
-        item["NUMEROS"] = st.text_input("Fls. / Nº", value=item.get("NUMEROS", ""), key=f"pad_nums_{item_id}")
-        if st.button("💾 Salvar Padrão", key=f"save_pad_{item_id}"):
-            lst = st.session_state.get("padroes_list", [])
-            for i, it in enumerate(lst):
-                if it.get("id") == item_id:
-                    lst[i] = item
-                    break
-            st.session_state.padroes_list = lst
-            save_current_state({"padroes_list": lst})
-            st.success("Padrão salvo.")
-        if st.button("🗑️ Excluir Padrão", key=f"del_pad_{item_id}"):
-            st.session_state.padroes_list = [x for x in st.session_state.padroes_list if x.get("id") != item_id]
-            save_current_state({"padroes_list": st.session_state.get("padroes_list", [])})
-            st.experimental_rerun()
+    # Labels
+    labels = [EOG_ELEMENTS[k] for k in ordered_keys]
+    labels.append(labels[0])
+
+    # Ângulos
+    N = len(ordered_keys)
+    angles = [(n / float(N)) * 2 * 3.141592 for n in range(N)]
+    angles.append(angles[0])
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
+
+    ax.plot(angles, values, linewidth=2)
+    ax.fill(angles, values, alpha=0.3)
+
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels, fontsize=9)
+
+    ax.set_yticks([0, 1, 2])
+    ax.set_yticklabels(["Divergente", "Limitado", "Adequado"])
+
+    ax.set_ylim(0, 2)
+
+    ax.set_title("Análise dos Elementos de Ordem Geral (EOG)", y=1.1)
+
+    st.pyplot(fig)
 
 
-def render_anexo_upload_form(q_item: Dict[str, Any]):
-    """
-    Form para upload/exibição/exclusão de anexo vinculado a um documento questionado.
-    Adiciona botão 'Mesa Gráfica' quando houver anexo para edição.
-    """
-    q_id = q_item.get("id")
-    descr = f"ANEXO para {q_item.get('TIPO_DOCUMENTO','Documento')} (Fls. {q_item.get('FLS_DOCUMENTOS','')})"
-    anexo = next((a for a in st.session_state.get("anexos", []) if a.get("id_referencia") == q_id), None)
-
-    with st.container():
-        st.caption(descr)
-        col1, col2 = st.columns([4,1])
-        if anexo:
-            col1.markdown(f"**Arquivo:** {anexo.get('filename', 'sem_nome')}")
-            if col2.button("🗑️ Excluir Anexo", key=f"del_anexo_{q_id}"):
-                st.session_state.anexos = [a for a in st.session_state.anexos if a.get("id_referencia") != q_id]
-                save_current_state({"anexos": st.session_state.anexos})
-                st.success("Anexo removido.")
-                st.experimental_rerun()
-
-            # botão Mesa Gráfica
-            if col2.button("✏️ Mesa Gráfica", key=f"mesa_anexo_{q_id}"):
-                # abrir editor em expander
-                with st.expander(f"Mesa Gráfica — {anexo.get('filename')}", expanded=True):
-                    edited = image_editor_tool(anexo.get("bytes"), image_title=anexo.get("filename"))
-                    if edited:
-                        # substitui bytes do anexo e salva
-                        anexo["bytes"] = edited
-                        save_current_state({"anexos": st.session_state.anexos})
-                        st.success("Anexo atualizado a partir da Mesa Gráfica.")
-                        st.experimental_rerun()
-        else:
-            uploaded = col1.file_uploader("Upload do Anexo (pdf/png/jpg)", type=["pdf", "png", "jpg", "jpeg"], key=f"upload_anexo_{q_id}")
-            if uploaded is not None:
-                file_bytes = uploaded.read()
-                new_anexo = {
-                    "id": gerar_id(),
-                    "origem": "documento_questionado",
-                    "id_referencia": q_id,
-                    "descricao": descr,
-                    "bytes": file_bytes,
-                    "filename": uploaded.name,
-                    "mime_type": uploaded.type
-                }
-                lst = st.session_state.get("anexos", [])
-                lst.append(new_anexo)
-                st.session_state.anexos = lst
-                save_current_state({"anexos": lst})
-                st.success("Anexo carregado.")
-                st.experimental_rerun()
-
-
-# ----------------------------------------------------------------------
-# Sections: Questionados / Padrões (Etapa 4)
-# ----------------------------------------------------------------------
-def render_questionados_section():
-    st.header("4. DOCUMENTOS SUBMETIDOS A EXAME")
-    st.subheader("4.1 Documentos Questionados (PQ)")
-    q_list = st.session_state.get("questionados_list", [])
-
-    if not q_list:
-        st.info("Nenhum documento questionado adicionado.")
-    for idx, q in enumerate(list(q_list)):
-        render_questionado_form(q, idx)
-        # anexo relacionado
-        render_anexo_upload_form(q)
-
-    if st.button("➕ Adicionar Documento Questionado", key="add_questionado_btn"):
-        new_q = {"id": gerar_id(), "TIPO_DOCUMENTO": "Documento Questionado", "FLS_DOCUMENTOS": "", "DESCRICAO_IMAGEM": ""}
-        st.session_state.questionados_list.append(new_q)
-        save_current_state({"questionados_list": st.session_state.questionados_list})
-        st.experimental_rerun()
-
-
-def render_padroes_section():
-    st.subheader("4.2 Documentos Padrão (PCE/PCA)")
-    padroes = st.session_state.get("padroes_list", [])
-    if not padroes:
-        st.info("Nenhum documento padrão adicionado.")
-    for idx, p in enumerate(list(padroes)):
-        render_padrao_form(p, idx)
-
-    if st.button("➕ Adicionar Documento Padrão", key="add_padrao_btn"):
-        new_p = {"id": gerar_id(), "TIPO_DOCUMENTO": "Documento Padrão", "NUMEROS": ""}
-        st.session_state.padroes_list.append(new_p)
-        save_current_state({"padroes_list": st.session_state.padroes_list})
-        st.experimental_rerun()
-
-
-# ----------------------------------------------------------------------
-# Módulo de Análise (Etapa 5) - interface que usa plot_eog_radar e Mesa Gráfica
-# ----------------------------------------------------------------------
-def render_module_analise():
-    st.header("5. EXAMES PERICIAIS E METODOLOGIA — Análises Gráficas")
-    if not st.session_state.get("questionados_list"):
-        st.warning("Cadastre documentos questionados primeiro (Etapa 4).")
-        return
-
-    options = {q["id"]: f"{q.get('TIPO_DOCUMENTO','Doc')} — {q.get('FLS_DOCUMENTOS','')}" for q in st.session_state.get("questionados_list", [])}
-    selected = st.selectbox("Selecione documento para análise", options=list(options.keys()), format_func=lambda k: options[k], key="analise_select")
-
-    if not selected:
-        return
-
-    analysis = get_analysis_for_questionado(selected)
-
-    st.subheader("5.1 Elementos de Ordem Geral (EOG)")
-    col1, col2 = st.columns(2)
-    key_prefix = selected
-
-    # selects que atualizam session_state (ao vivo)
-    val_hab = col1.selectbox("Habilidade / Velocidade", EOG_OPCOES, index=EOG_OPCOES.index(analysis["eog_elements"].get("HABILIDADE_VELOCIDADE", "PENDENTE")), key=f"eog_hab_{key_prefix}")
-    val_cal = col1.selectbox("Calibre", EOG_OPCOES, index=EOG_OPCOES.index(analysis["eog_elements"].get("CALIBRE", "PENDENTE")), key=f"eog_cal_{key_prefix}")
-    val_esp = col2.selectbox("Espontaneidade / Dinamismo", EOG_OPCOES, index=EOG_OPCOES.index(analysis["eog_elements"].get("ESPONTANEIDADE_DINAMISMO", "PENDENTE")), key=f"eog_esp_{key_prefix}")
-    val_alin = col2.selectbox("Alinhamento Gráfico", EOG_OPCOES, index=EOG_OPCOES.index(analysis["eog_elements"].get("ALINHAMENTO_GRAFICO", "PENDENTE")), key=f"eog_alin_{key_prefix}")
-    val_ataq = col1.selectbox("Ataques / Remates", EOG_OPCOES, index=EOG_OPCOES.index(analysis["eog_elements"].get("ATAQUES_REMATES", "PENDENTE")), key=f"eog_ataq_{key_prefix}")
-
-    live = {
-        "HABILIDADE_VELOCIDADE": st.session_state.get(f"eog_hab_{key_prefix}", analysis["eog_elements"].get("HABILIDADE_VELOCIDADE", "PENDENTE")),
-        "CALIBRE": st.session_state.get(f"eog_cal_{key_prefix}", analysis["eog_elements"].get("CALIBRE", "PENDENTE")),
-        "ESPONTANEIDADE_DINAMISMO": st.session_state.get(f"eog_esp_{key_prefix}", analysis["eog_elements"].get("ESPONTANEIDADE_DINAMISMO", "PENDENTE")),
-        "ALINHAMENTO_GRAFICO": st.session_state.get(f"eog_alin_{key_prefix}", analysis["eog_elements"].get("ALINHAMENTO_GRAFICO", "PENDENTE")),
-        "ATAQUES_REMATES": st.session_state.get(f"eog_ataq_{key_prefix}", analysis["eog_elements"].get("ATAQUES_REMATES", "PENDENTE")),
-    }
-
-    st.markdown("**Visualização do Radar (ao vivo)**")
-    plot_eog_radar(live)
-
-    st.markdown("---")
-    st.subheader("5.2 Confronto Grafoscópico")
-    for ck, desc in CONFRONTO_ELEMENTS.items():
-        analysis["confronto_texts"][ck] = st.text_area(desc, value=analysis["confronto_texts"].get(ck, ""), key=f"conf_{ck}_{selected}", height=100)
-
-    st.markdown("---")
-    st.subheader("5.3 Descrição e Adendo de Imagem")
-    analysis["descricao_analise"] = st.text_area("Descrição Livre", value=analysis.get("descricao_analise", ""), key=f"desc_analise_{selected}", height=150)
-
-    # Upload + Mesa Gráfica
-    up_col, info_col = st.columns([1,3])
-    uploaded = up_col.file_uploader("Upload para Análise (PNG/JPG)", type=["png", "jpg", "jpeg"], key=f"up_img_analise_{selected}")
-    if uploaded:
-        img_bytes = uploaded.read()
-        if st.button("✏️ Abrir Editor (Mesa Gráfica)", key=f"open_editor_{selected}"):
-            edited = image_editor_tool(img_bytes, image_title=f"Análise_{selected}")
-            if edited:
-                analysis["imagem_analise_bytes"] = edited
-                analysis["tem_imagem_analise"] = True
-                st.success("Imagem editada e registrada como adendo para a análise.")
-
-    elif analysis.get("tem_imagem_analise"):
-        info_col.info("Existe adendo de imagem salvo para esta análise.")
-
-    st.markdown("---")
-    if st.button("💾 Salvar Análise (5.1 - 5.3)", key=f"save_analysis_{selected}"):
-        analysis["eog_elements"] = {k: live[k] for k in live.keys()}
-        analysis["is_saved"] = True
-        st.session_state.saved_analyses[selected] = analysis
-        save_current_state({"saved_analyses": st.session_state.saved_analyses})
-        st.success("Análise salva com sucesso.")
-        st.experimental_rerun()
+# ======================================================================
+# FIM DA PARTE 2
+# A PARTIR DAQUI ENTRA A PARTE 3 (Etapas do Laudo)
+# ======================================================================
 
 # ======================================================================
 # PARTE 3/4 - ETAPAS 6 E 7 + CONTROLE DE FLUXO DO LAUDO
