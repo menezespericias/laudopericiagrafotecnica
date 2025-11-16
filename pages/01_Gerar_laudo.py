@@ -1,36 +1,65 @@
 # ======================================================================
-# 01_Gerar_laudo.py
+# 01_Gerar_laudo.py — PARTE 1
+# CONFIGURAÇÃO GERAL + IMPORTS COM FALLBACK + SESSÃO + FUNÇÕES BASE
 # Sistema de Geração de Laudo Pericial Grafotécnico
-# Versão revisada por ChatGPT – com melhorias de EOG e Editor de Imagem
 # ======================================================================
 
 import streamlit as st
 import uuid
 import json
 import os
-from datetime import date
 import datetime
 import matplotlib.pyplot as plt
 from io import BytesIO
 from PIL import Image
-from streamlit_drawable_canvas import st_canvas
-from streamlit_cropper import st_cropper
-
-# ============================================================
-# IMPORTAÇÃO CORRIGIDA — módulos backend estão na raiz
-# ============================================================
-from data_handler import (
-    save_process_data,
-    load_process_data,
-    list_processes,
-    PROCESS_DATA_DIR
-)
-
-from word_handler import generate_report_from_template
-
 
 # ======================================================================
-# CONFIGURAÇÕES GERAIS
+# IMPORTAÇÃO DOS MÓDULOS DE BACKEND (COM FALLBACK INTELIGENTE)
+# ======================================================================
+
+BACKEND_OK = True
+BACKEND_MESSAGE = ""
+
+try:
+    # Tenta importar do pacote src (recomendado)
+    from src.data_handler import (
+        save_process_data,
+        load_process_data,
+        list_processes,
+        PROCESS_DATA_DIR
+    )
+    from src.word_handler import generate_report_from_template
+
+except Exception as _e_src:
+    # Primeiro fallback: tenta importar dos arquivos na raiz
+    try:
+        from data_handler import (
+            save_process_data,
+            load_process_data,
+            list_processes,
+            PROCESS_DATA_DIR
+        )
+        from word_handler import generate_report_from_template
+        BACKEND_OK = True
+        BACKEND_MESSAGE = ""
+    except Exception as _e_root:
+        BACKEND_OK = False
+        BACKEND_MESSAGE = f"src error: {_e_src}  |  root error: {_e_root}"
+
+# ======================================================================
+# ALERTA AO USUÁRIO SE O BACKEND NÃO FOI IMPORTADO
+# ======================================================================
+
+if not BACKEND_OK:
+    st.warning(
+        "⚠️ Não foi possível carregar os módulos de backend (src/ ou raiz).\n\n"
+        "A funcionalidade de salvar processos, carregar dados e gerar laudo pode estar limitada.\n"
+        "Verifique a pasta /src e reinicie a aplicação.\n\n"
+        f"Erro detectado: {BACKEND_MESSAGE}"
+    )
+
+# ======================================================================
+# CONFIGURAÇÕES GERAIS DO PROJETO
 # ======================================================================
 
 st.set_page_config(
@@ -40,7 +69,7 @@ st.set_page_config(
 )
 
 # ======================================================================
-# CONSTANTES E DEFINIÇÕES DE EOG
+# DEFINIÇÕES FIXAS DE EOG
 # ======================================================================
 
 EOG_ELEMENTS = {
@@ -60,25 +89,18 @@ EOG_OPCOES_RADAR = {
     "PENDENTE": 1
 }
 
-CONFRONTO_ELEMENTS = {
-    "proporcao": "Proporção Gráfica",
-    "espacamento": "Espaçamento",
-    "pressao": "Pressão Escriturária",
-    "continuacao": "Continuidade",
-    "forma": "Forma Gráfica"
-}
+# ======================================================================
+# FUNÇÕES DE SESSÃO E ESTADO
+# ======================================================================
 
-# ======================================================================
-# FUNÇÕES AUXILIARES DO SISTEMA
-# ======================================================================
 
 def safe_get(key, default=None):
-    if key in st.session_state:
-        return st.session_state[key]
-    return default
+    """Obtém valor de st.session_state com fallback."""
+    return st.session_state.get(key, default)
 
 
 def ensure_session_defaults():
+    """Inicializa todas as variáveis exigidas pelo sistema."""
     defaults = {
         "process_loaded": False,
         "selected_process_id": None,
@@ -97,68 +119,138 @@ def ensure_session_defaults():
         "etapa_atual": 1,
     }
 
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-
-def save_current_state(updated_data=None):
-    """
-    Salva o estado inteiro do session_state no JSON.
-    Converte tipos não serializáveis.
-    """
-    data = {}
-
-    for key, value in st.session_state.items():
-
-        if isinstance(value, set):
-            data[key] = list(value)
-
-        elif isinstance(value, (datetime.date, datetime.datetime)):
-            data[key] = value.isoformat()
-
-        elif isinstance(value, dict):
-            inner = {}
-            for ik, iv in value.items():
-                if isinstance(iv, set):
-                    inner[ik] = list(iv)
-                elif isinstance(iv, (datetime.date, datetime.datetime)):
-                    inner[ik] = iv.isoformat()
-                else:
-                    inner[ik] = iv
-            data[key] = inner
-
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
         else:
-            data[key] = value
+            # normaliza formatos simples
+            if key == "etapas_concluidas" and isinstance(st.session_state[key], list):
+                st.session_state[key] = set(st.session_state[key])
+
+
+def _make_serializable(obj):
+    """Converte recursivamente objetos para formatos serializáveis por JSON."""
+    if isinstance(obj, set):
+        return list(obj)
+    if isinstance(obj, datetime.datetime):
+        return obj.isoformat()
+    if isinstance(obj, datetime.date):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        result = {}
+        for k, v in obj.items():
+            # evita salvar objetos grandes (como imagens) inline
+            if k in ("imagem_obj", "imagem_bytes", "file_obj", "bytes"):
+                continue
+            result[k] = _make_serializable(v)
+        return result
+    if isinstance(obj, list):
+        return [_make_serializable(i) for i in obj]
+    return obj
+
+
+def save_current_state(data_to_save: dict = None) -> bool:
+    """
+    Salva o estado atual do processo no arquivo JSON.
+    Se `data_to_save` for None, salva um conjunto padrão de chaves.
+    Retorna True se salvo com sucesso.
+    """
+    if not BACKEND_OK:
+        st.error("Salvar indisponível: backend não carregado.")
+        return False
 
     try:
-        save_process_data(st.session_state.get("selected_process_id"), data)
+        process_id = st.session_state.get("selected_process_id")
+        if not process_id:
+            st.error("Número do processo não informado. Selecione ou crie um processo primeiro.")
+            return False
+
+        if data_to_save is None:
+            data_to_save = {
+                "AUTOR": st.session_state.get("AUTOR"),
+                "REU": st.session_state.get("REU"),
+                "DATA_LAUDO": st.session_state.get("DATA_LAUDO").isoformat()
+                if isinstance(st.session_state.get("DATA_LAUDO"), (datetime.date, datetime.datetime))
+                else st.session_state.get("DATA_LAUDO"),
+                "questionados_list": st.session_state.get("questionados_list", []),
+                "padroes_list": st.session_state.get("padroes_list", []),
+                "saved_analyses": st.session_state.get("saved_analyses", {}),
+                "anexos": st.session_state.get("anexos", []),
+                "adendos": st.session_state.get("adendos", []),
+                "etapas_concluidas": list(st.session_state.get("etapas_concluidas", [])),
+                "etapa_atual": st.session_state.get("etapa_atual", 1),
+            }
+
+        serializable = _make_serializable(data_to_save)
+        save_process_data(process_id, serializable)
         return True
     except Exception as e:
-        st.error(f"Erro ao salvar o processo: {e}")
+        st.error(f"Erro ao salvar estado: {e}")
         return False
 
 
-def load_process(process_id):
-    dados = load_process_data(process_id)
+def load_process(process_id: str) -> bool:
+    """Carrega dados salvos de um processo existente para st.session_state."""
+    if not BACKEND_OK:
+        st.error("Carregamento indisponível: backend não carregado.")
+        return False
+
+    try:
+        dados = load_process_data(process_id)
+    except Exception as e:
+        st.error(f"Erro ao carregar dados do processo: {e}")
+        return False
+
     if not dados:
-        st.error("Não foi possível carregar o processo.")
+        st.error("Processo não encontrado ou arquivo corrompido.")
         return False
 
+    # aplicar dados no session_state com cuidados de tipos
     for k, v in dados.items():
-        if isinstance(v, list) and k == "etapas_concluidas":
+        if k == "etapas_concluidas" and isinstance(v, list):
             st.session_state[k] = set(v)
-        elif k == "DATA_LAUDO":
+        elif k == "DATA_LAUDO" and isinstance(v, str):
             try:
                 st.session_state[k] = datetime.date.fromisoformat(v)
-            except:
-                st.session_state[k] = date.today()
+            except Exception:
+                st.session_state[k] = datetime.date.today()
         else:
             st.session_state[k] = v
 
-    st.session_state.process_loaded = True
-    st.session_state.selected_process_id = process_id
+    st.session_state["process_loaded"] = True
+    st.session_state["selected_process_id"] = process_id
     return True
+
+
+# ======================================================================
+# GERADOR DE IDs PARA QUESTIONADOS
+# ======================================================================
+
+
+def gerar_id(short: bool = True) -> str:
+    uid = str(uuid.uuid4())
+    return uid[:8] if short else uid
+
+
+def format_process_label(process_id: str) -> str:
+    """Formata exibição da lista de processos."""
+    if not BACKEND_OK:
+        return f"{process_id} — backend indisponível"
+    try:
+        dados = load_process_data(process_id)
+        if not dados:
+            return f"{process_id} — [Erro ao carregar]"
+        autor = dados.get("AUTOR", "N/A")
+        reu = dados.get("REU", "N/A")
+        return f"{process_id} — Autor: {autor} | Réu: {reu}"
+    except Exception:
+        return f"{process_id} — [Erro ao acessar dados]"
+
+# ======================================================================
+# FIM DA PARTE 1
+# A PARTIR DAQUI DEVE VIR A PARTE 2 (Editor de imagem, Plot EOG, etc.)
+# ======================================================================
+
 
 # ======================================================================
 # PARTE 2/4 - Auxiliares de Análise, Formulários e Render de Documentos
