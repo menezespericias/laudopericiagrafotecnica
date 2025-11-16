@@ -1,79 +1,109 @@
+"""
+data_handler.py
+Backend responsável por salvar, carregar, apagar e listar processos.
+Compatível com o fluxo do arquivo pages/01_Gerar_laudo.py.
+"""
+
 import os
 import json
-from datetime import date, datetime
-from typing import Dict, Any, Set, List
+from typing import Any, Dict, List
 
-# --- Configuração de Pasta ---
-DATA_FOLDER = "data"
-# Garante que a pasta 'data' existe
-os.makedirs(DATA_FOLDER, exist_ok=True) 
+# ============================================================
+# CONFIGURAÇÃO DO DIRETÓRIO DE DADOS
+# ============================================================
 
-# --- Funções de Persistência JSON ---
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROCESS_DATA_DIR = os.path.join(BASE_DIR, "data")
 
-def save_process_data(process_id: str, session_state_data: Dict[str, Any]) -> str:
+# Garante que a pasta /data exista
+os.makedirs(PROCESS_DATA_DIR, exist_ok=True)
+
+
+# ============================================================
+# FUNÇÕES PRINCIPAIS DE BACKEND
+# ============================================================
+
+def get_process_file_path(process_id: str) -> str:
     """
-    Salva os dados do processo do Streamlit session_state em um arquivo JSON.
-    Filtra chaves internas do Streamlit e serializa objetos complexos.
+    Retorna o caminho completo do arquivo JSON do processo.
     """
-    if not process_id:
-        raise ValueError("ID do processo não pode ser vazio para salvar.")
-        
-    # 1. Filtra chaves internas e temporárias (Ex: process_to_load, editing_X)
-    keys_to_exclude = ["process_to_load"] 
-    keys_to_exclude.extend([k for k in session_state_data.keys() if k.startswith(("editing_", "form_"))])
+    return os.path.join(PROCESS_DATA_DIR, f"{process_id}.json")
 
-    # Cria uma cópia dos dados filtrados para manipulação
-    data_to_save = {k: v for k, v in session_state_data.items() 
-                    if k not in keys_to_exclude}
-    
-    # 2. CORREÇÃO CRÍTICA (Set -> List): Trata o 'set' de etapas_concluidas
-    # JSON não aceita 'set', converte para 'list' antes de salvar.
-    if "etapas_concluidas" in data_to_save and isinstance(data_to_save["etapas_concluidas"], set):
-        data_to_save["etapas_concluidas"] = list(data_to_save["etapas_concluidas"])
-    
-    # 3. Converte objetos 'date' para string no formato DD/MM/AAAA para salvar no JSON
-    for k, v in data_to_save.items():
-        if isinstance(v, date):
-            data_to_save[k] = v.strftime("%d/%m/%Y")
-        
-        # 4. Trata objetos de arquivo (UploadedFile) em listas: remove o objeto binário 'imagem_obj'
-        if isinstance(v, list):
-            for item in v:
-                if isinstance(item, dict) and "imagem_obj" in item:
-                    # Remove o objeto binário da memória para não inchar o JSON
-                    item.pop("imagem_obj", None)
-    
-    # 5. Salva o JSON
-    json_path = os.path.join(DATA_FOLDER, f"{process_id}.json")
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(data_to_save, f, ensure_ascii=False, indent=4)
 
-    return json_path
+def save_process_data(process_id: str, data: Dict[str, Any]) -> None:
+    """
+    Salva o dicionário de dados do processo em formato JSON.
+    """
+    file_path = get_process_file_path(process_id)
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
 
 def load_process_data(process_id: str) -> Dict[str, Any]:
     """
-    Carrega os dados de um processo a partir do JSON.
-    Retorna o dicionário de dados, convertendo listas de volta para 'set' e strings para 'date'.
+    Carrega os dados do arquivo JSON do processo.
+    Se o arquivo não existir, retorna {}.
     """
-    json_path = os.path.join(DATA_FOLDER, f"{process_id}.json")
-    if not os.path.exists(json_path):
-        raise FileNotFoundError(f"Arquivo JSON para o processo {process_id} não encontrado.")
-    
-    with open(json_path, "r", encoding="utf-8") as f:
-        dados_carregados = json.load(f)
-        
-    # 1. CORREÇÃO CRÍTICA (List -> Set): Converte a lista de etapas_concluidas de volta para 'set'
-    if "etapas_concluidas" in dados_carregados and isinstance(dados_carregados["etapas_concluidas"], list):
-        dados_carregados["etapas_concluidas"] = set(dados_carregados["etapas_concluidas"])
-        
-    # 2. Converte strings de data de volta para objetos date, se for o caso
-    for key, value in dados_carregados.items():
-        if isinstance(value, str) and (key.startswith('data_') or key.endswith('_DATA')):
-            try:
-                # O formato esperado é DD/MM/AAAA
-                dados_carregados[key] = datetime.strptime(value, "%d/%m/%Y").date()
-            except ValueError:
-                # Se falhar, mantém como string
-                pass 
-                
-    return dados_carregados
+    file_path = get_process_file_path(process_id)
+
+    if not os.path.exists(file_path):
+        return {}
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    except Exception:
+        return {}
+
+
+def delete_process(process_id: str) -> bool:
+    """
+    Remove o arquivo JSON do processo.
+    Retorna True se removido.
+    """
+    file_path = get_process_file_path(process_id)
+
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        return True
+
+    return False
+
+
+# ============================================================
+# FUNÇÕES DE LISTAGEM
+# ============================================================
+
+def list_process_files() -> List[str]:
+    """
+    Retorna lista de nomes dos arquivos JSON na pasta /data.
+    """
+    try:
+        return [
+            f for f in os.listdir(PROCESS_DATA_DIR)
+            if f.lower().endswith(".json")
+        ]
+    except Exception:
+        return []
+
+
+def list_processes() -> List[str]:
+    """
+    Função esperada pelo frontend.
+    Retorna *somente os IDs* dos processos.
+    Exemplo: ['a1b2c3d4', 'x9y8z7w6']
+    """
+    files = list_process_files()
+    ids = [os.path.splitext(f)[0] for f in files]
+    return sorted(ids)
+
+
+# ============================================================
+# DEPURAÇÃO OPCIONAL
+# ============================================================
+
+if __name__ == "__main__":
+    print("Diretório de processos:", PROCESS_DATA_DIR)
+    print("Processos encontrados:", list_processes())
