@@ -3,3 +3,6 @@ pandas
 matplotlib
 python-docx
 num2words
+streamlit-cropper
+streamlit-drawable-canvas
+Pillow
