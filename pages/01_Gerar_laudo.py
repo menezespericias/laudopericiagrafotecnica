@@ -78,35 +78,105 @@ def init_session_state():
 
 
 def save_current_state() -> bool:
-    """Salva o estado atual do Streamlit (exceto dados temporários) no arquivo JSON do processo."""
-    
+    """
+    Salva o estado atual do Streamlit (exceto dados temporários) no arquivo JSON do processo.
+    - Converte tipos não-serializáveis (set -> list, date/datetime -> ISO string).
+    - Remove objetos binários temporários (ex: 'imagem_bytes', 'imagem_obj') para não inflar o JSON.
+    - Usa a assinatura de save_process_data(process_id, session_state_data) do data_handler.
+    """
     process_id = st.session_state.get('numero_processo')
     if not process_id:
         st.error("Não foi possível salvar: Número de processo ausente.")
         return False
-        
-    # 1. Copia o estado atual
-    data_to_save = dict(st.session_state)
-    
-    # 2. Limpa dados temporários ou sensíveis à serialização
-    keys_to_exclude = [
-        'process_to_load', 'CAMINHO_MODELO', 'BLOCO_CONCLUSAO_DINAMICO', 
-        'BLOCO_QUESITOS_AUTOR', 'BLOCO_QUESITOS_REU', 
-        'input_JUIZO_DE_DIREITO', 'input_ID_NOMEACAO', 'input_DATA_LAUDO', 
-        # Exclui chaves de controle de widget
-        *(k for k in data_to_save.keys() if k.startswith('input_') or k.startswith('doc_') or k.startswith('anexo_') or k.startswith('quesito_'))
-    ]
-    for key in keys_to_exclude:
-        data_to_save.pop(key, None)
 
-    # 3. Serializa o SET de etapas concluídas para LIST (JSON não suporta SET)
-    if 'etapas_concluidas' in data_to_save:
-        data_to_save['etapas_concluidas'] = list(data_to_save['etapas_concluidas'])
-    
-    # 4. Salva no disco
-    return save_process_data(process_id, data_to_save, DATA_FOLDER)
+    # 1. Copia o estado atual (evitar mutações diretas em st.session_state)
+    raw = dict(st.session_state)
+
+    # 2. Remove chaves temporárias/controle de widget que não devem ser persistidas
+    keys_to_exclude_prefixes = ('input_', 'doc_', 'anexo_', 'quesito_', 'editing_', 'form_')
+    keys_to_exclude = {'process_to_load', 'CAMINHO_MODELO', 'BLOCO_CONCLUSAO_DINAMICO',
+                       'BLOCO_QUESITOS_AUTOR', 'BLOCO_QUESITOS_REU'}
+    # Exclui por prefixo
+    for k in list(raw.keys()):
+        if any(k.startswith(pref) for pref in keys_to_exclude_prefixes):
+            keys_to_exclude.add(k)
+    for k in keys_to_exclude:
+        raw.pop(k, None)
+
+    # 3. Normaliza tipos para JSON — cria uma cópia serializável
+    from datetime import date, datetime
+    def make_serializable(obj):
+        # Sets -> lists
+        if isinstance(obj, set):
+            return list(obj)
+        # date / datetime -> string no formato DD/MM/YYYY
+        if isinstance(obj, datetime):
+            return obj.strftime("%d/%m/%Y %H:%M:%S")
+        if isinstance(obj, date):
+            return obj.strftime("%d/%m/%Y")
+        # Lists: processa itens recursivamente (p.ex. listas de dicts)
+        if isinstance(obj, list):
+            new_list = []
+            for item in obj:
+                # Se for dict, processa suas chaves (ver abaixo)
+                if isinstance(item, dict):
+                    # remove possíveis blobs/ UploadedFile objects (campos usados aqui: imagem_obj, imagem_bytes, bytes)
+                    item = {kk: vv for kk, vv in item.items() if kk not in ('imagem_obj', 'imagem_bytes', 'bytes', 'file_obj')}
+                    # aplica serialização recursiva nos valores restantes
+                    new_list.append({kk: make_serializable(vv) for kk, vv in item.items()})
+                else:
+                    new_list.append(make_serializable(item))
+            return new_list
+        # Dicts: processa recursivamente (remove blobs também)
+        if isinstance(obj, dict):
+            new_dict = {}
+            for kk, vv in obj.items():
+                if kk in ('imagem_obj', 'imagem_bytes', 'bytes', 'file_obj'):
+                    # pula campos binários
+                    continue
+                new_dict[kk] = make_serializable(vv)
+            return new_dict
+        # Tipos primitivos: ficam como estão
+        return obj
+
+    serializable_data = {k: make_serializable(v) for k, v in raw.items()}
+
+    # 4. Garante que 'etapas_concluidas' esteja serializável (set -> list)
+    if 'etapas_concluidas' in serializable_data and isinstance(serializable_data['etapas_concluidas'], (set, tuple)):
+        serializable_data['etapas_concluidas'] = list(serializable_data['etapas_concluidas'])
+
+    # 5. Assegura chaves que o word_handler espera (evita KeyError ao gerar laudo)
+    serializable_data.setdefault('BLOCO_CONCLUSAO_DINAMICO', '')
+    serializable_data.setdefault('BLOCO_QUESITOS_AUTOR', '')
+    serializable_data.setdefault('BLOCO_QUESITOS_REU', '')
+    serializable_data.setdefault('RESUMO_CABECALHO', '')
+
+    # 6. Salva usando a função do data_handler (assinatura: process_id, dados)
+    try:
+        # Chamada CORRIGIDA: apenas 2 argumentos, conforme data_handler.py.
+        save_path = save_process_data(process_id, serializable_data)
+        # Se save_process_data retornar caminho, considera sucesso
+        return bool(save_path)
+    except Exception as e:
+        st.error(f"Erro ao salvar o estado do processo: {e}")
+        return False
 
 
+def save_current_state_and_log() -> bool:
+    """
+    Wrapper que chama save_current_state() e registra mensagens amigáveis para o usuário.
+    Mantido para compatibilidade com chamadas no UI.
+    """
+    try:
+        ok = save_current_state()
+        if ok:
+            st.success("Estado salvo com sucesso.")
+        else:
+            st.warning("O estado não pôde ser salvo. Verifique mensagens de erro.")
+        return ok
+    except Exception as e:
+        st.error(f"Erro inesperado ao salvar: {e}")
+        return False
 def load_process(process_id: str):
     """Carrega dados de um processo existente para o st.session_state."""
     
