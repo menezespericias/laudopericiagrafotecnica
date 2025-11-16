@@ -1,7 +1,6 @@
 # ======================================================================
 # 01_Gerar_laudo.py — PARTE 1
-# CONFIGURAÇÃO GERAL + IMPORTS COM FALLBACK + SESSÃO + FUNÇÕES BASE
-# Sistema de Geração de Laudo Pericial Grafotécnico
+# CONFIGURAÇÃO GERAL + IMPORTS ROBUSTOS + SESSÃO + FUNÇÕES BASE
 # ======================================================================
 
 import streamlit as st
@@ -9,54 +8,93 @@ import uuid
 import json
 import os
 import datetime
+from datetime import date
 import matplotlib.pyplot as plt
 from io import BytesIO
 from PIL import Image
+from typing import Dict, List, Any, Optional
 
 # ======================================================================
-# IMPORTAÇÃO DOS MÓDULOS DE BACKEND (COM FALLBACK INTELIGENTE)
+# IMPORTS ROBUSTOS DO BACKEND (tenta src/ → raiz → stubs)
 # ======================================================================
 
 BACKEND_OK = True
-BACKEND_MESSAGE = ""
+BACKEND_ISSUES = []
 
+# defaults for required backend functions (stubs if missing)
+def _stub_save_process_data(*args, **kwargs):
+    st.error("save_process_data indisponível (backend ausente).")
+    return False
+
+def _stub_load_process_data(*args, **kwargs):
+    st.error("load_process_data indisponível (backend ausente).")
+    return {}
+
+def _stub_list_processes(*args, **kwargs):
+    return []
+
+def _stub_generate_report_from_template(*args, **kwargs):
+    raise FileNotFoundError("generate_report_from_template indisponível (backend ausente).")
+
+def _stub_atualizar_status(*args, **kwargs):
+    pass
+
+# Try src package first, then root
 try:
-    # Tenta importar do pacote src (recomendado)
-    from src.data_handler import (
-        save_process_data,
-        load_process_data,
-        list_processes,
-        PROCESS_DATA_DIR
-    )
-    from src.word_handler import generate_report_from_template
-
-except Exception as _e_src:
-    # Primeiro fallback: tenta importar dos arquivos na raiz
+    from src.data_handler import save_process_data, load_process_data, list_processes, PROCESS_DATA_DIR
     try:
-        from data_handler import (
-            save_process_data,
-            load_process_data,
-            list_processes,
-            PROCESS_DATA_DIR
-        )
-        from word_handler import generate_report_from_template
-        BACKEND_OK = True
-        BACKEND_MESSAGE = ""
-    except Exception as _e_root:
+        from src.word_handler import generate_report_from_template
+    except Exception as e:
+        generate_report_from_template = _stub_generate_report_from_template
         BACKEND_OK = False
-        BACKEND_MESSAGE = f"src error: {_e_src}  |  root error: {_e_root}"
+        BACKEND_ISSUES.append(f"src.word_handler: {e}")
+    try:
+        from src.db_handler import atualizar_status
+    except Exception:
+        atualizar_status = _stub_atualizar_status
+        BACKEND_OK = False
+        BACKEND_ISSUES.append("src.db_handler import failed")
+except Exception as e_src:
+    # fallback to root-level modules
+    try:
+        from data_handler import save_process_data, load_process_data, list_processes, PROCESS_DATA_DIR
+        try:
+            from word_handler import generate_report_from_template
+        except Exception as e_wh:
+            generate_report_from_template = _stub_generate_report_from_template
+            BACKEND_OK = False
+            BACKEND_ISSUES.append(f"root word_handler: {e_wh}")
+        try:
+            from db_handler import atualizar_status
+        except Exception:
+            atualizar_status = _stub_atualizar_status
+            BACKEND_OK = False
+            BACKEND_ISSUES.append("root db_handler import failed")
+    except Exception as e_root:
+        # no usable backend found — attach stubs
+        BACKEND_OK = False
+        BACKEND_ISSUES.append(f"src import error: {e_src}")
+        BACKEND_ISSUES.append(f"root import error: {e_root}")
+        save_process_data = _stub_save_process_data
+        load_process_data = _stub_load_process_data
+        list_processes = _stub_list_processes
+        generate_report_from_template = _stub_generate_report_from_template
+        atualizar_status = _stub_atualizar_status
+        # set PROCESS_DATA_DIR to sensible default
+        PROCESS_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
 
 # ======================================================================
-# ALERTA AO USUÁRIO SE O BACKEND NÃO FOI IMPORTADO
+# AVISO DETALHADO AO USUÁRIO SE BACKEND NÃO CARREGOU PERFEITAMENTE
 # ======================================================================
-
 if not BACKEND_OK:
-    st.warning(
-        "⚠️ Não foi possível carregar os módulos de backend (src/ ou raiz).\n\n"
-        "A funcionalidade de salvar processos, carregar dados e gerar laudo pode estar limitada.\n"
-        "Verifique a pasta /src e reinicie a aplicação.\n\n"
-        f"Erro detectado: {BACKEND_MESSAGE}"
+    msg = (
+        "⚠️ **Não foi possível carregar os módulos de backend (src/ ou raiz).**\n\n"
+        "A funcionalidade de **salvar processos**, **carregar dados** e **gerar laudo** pode estar limitada.\n"
+        "Verifique a pasta `/src` e os arquivos word_handler.py, data_handler.py, db_handler.py e reinicie a aplicação.\n\n"
+        "Problemas detectados:\n"
+        f"{chr(10).join('- ' + i for i in BACKEND_ISSUES)}"
     )
+    st.warning(msg)
 
 # ======================================================================
 # CONFIGURAÇÕES GERAIS DO PROJETO
@@ -69,7 +107,7 @@ st.set_page_config(
 )
 
 # ======================================================================
-# DEFINIÇÕES FIXAS DE EOG
+# DEFINIÇÕES FIXAS DE EOG (constantes compartilhadas)
 # ======================================================================
 
 EOG_ELEMENTS = {
@@ -90,17 +128,11 @@ EOG_OPCOES_RADAR = {
 }
 
 # ======================================================================
-# FUNÇÕES DE SESSÃO E ESTADO
+# FUNÇÕES DE SESSÃO E ESTADO (garante chaves e tipos)
 # ======================================================================
 
-
-def safe_get(key, default=None):
-    """Obtém valor de st.session_state com fallback."""
-    return st.session_state.get(key, default)
-
-
 def ensure_session_defaults():
-    """Inicializa todas as variáveis exigidas pelo sistema."""
+    """Inicializa chaves necessárias em st.session_state."""
     defaults = {
         "process_loaded": False,
         "selected_process_id": None,
@@ -109,7 +141,7 @@ def ensure_session_defaults():
         "LISTA_QS_REU": [],
         "AUTOR": "",
         "REU": "",
-        "DATA_LAUDO": datetime.date.today(),
+        "DATA_LAUDO": date.today(),
         "saved_analyses": {},
         "active_questionado_id": None,
         "questionados_list": [],
@@ -117,84 +149,83 @@ def ensure_session_defaults():
         "anexos": [],
         "adendos": [],
         "etapa_atual": 1,
+        "theme_mode": "dark",
+        "wallpaper_choice": "Nenhum"
     }
 
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
         else:
-            # normaliza formatos simples
-            if key == "etapas_concluidas" and isinstance(st.session_state[key], list):
-                st.session_state[key] = set(st.session_state[key])
+            if k == "etapas_concluidas" and isinstance(st.session_state[k], list):
+                st.session_state[k] = set(st.session_state[k])
 
+# inicializa
+ensure_session_defaults()
+
+# ======================================================================
+# SERIALIZAÇÃO ROBUSTA (para salvar dados no JSON)
+# ======================================================================
 
 def _make_serializable(obj):
-    """Converte recursivamente objetos para formatos serializáveis por JSON."""
+    """Recursivamente torna um objeto JSON-serializável, pulando bytes/objetos pesados."""
     if isinstance(obj, set):
         return list(obj)
-    if isinstance(obj, datetime.datetime):
-        return obj.isoformat()
-    if isinstance(obj, datetime.date):
+    if isinstance(obj, (datetime.date, datetime.datetime)):
         return obj.isoformat()
     if isinstance(obj, dict):
-        result = {}
+        out = {}
         for k, v in obj.items():
-            # evita salvar objetos grandes (como imagens) inline
             if k in ("imagem_obj", "imagem_bytes", "file_obj", "bytes"):
                 continue
-            result[k] = _make_serializable(v)
-        return result
+            out[k] = _make_serializable(v)
+        return out
     if isinstance(obj, list):
         return [_make_serializable(i) for i in obj]
     return obj
 
-
-def save_current_state(data_to_save: dict = None) -> bool:
+def save_current_state(data: dict = None) -> bool:
     """
-    Salva o estado atual do processo no arquivo JSON.
-    Se `data_to_save` for None, salva um conjunto padrão de chaves.
-    Retorna True se salvo com sucesso.
+    Salva no backend o estado (ou apenas 'data' se fornecido).
+    Retorna True/False.
     """
     if not BACKEND_OK:
         st.error("Salvar indisponível: backend não carregado.")
         return False
 
+    process_id = st.session_state.get("selected_process_id")
+    if not process_id:
+        st.error("Nenhum processo selecionado. Selecione ou crie um processo primeiro.")
+        return False
+
+    payload = data if data is not None else {
+        "AUTOR": st.session_state.get("AUTOR"),
+        "REU": st.session_state.get("REU"),
+        "DATA_LAUDO": st.session_state.get("DATA_LAUDO").isoformat()
+            if isinstance(st.session_state.get("DATA_LAUDO"), (datetime.date, datetime.datetime))
+            else st.session_state.get("DATA_LAUDO"),
+        "questionados_list": st.session_state.get("questionados_list", []),
+        "padroes_list": st.session_state.get("padroes_list", []),
+        "saved_analyses": st.session_state.get("saved_analyses", {}),
+        "anexos": st.session_state.get("anexos", []),
+        "adendos": st.session_state.get("adendos", []),
+        "etapas_concluidas": list(st.session_state.get("etapas_concluidas", [])),
+        "etapa_atual": st.session_state.get("etapa_atual", 1)
+    }
+
     try:
-        process_id = st.session_state.get("selected_process_id")
-        if not process_id:
-            st.error("Número do processo não informado. Selecione ou crie um processo primeiro.")
-            return False
-
-        if data_to_save is None:
-            data_to_save = {
-                "AUTOR": st.session_state.get("AUTOR"),
-                "REU": st.session_state.get("REU"),
-                "DATA_LAUDO": st.session_state.get("DATA_LAUDO").isoformat()
-                if isinstance(st.session_state.get("DATA_LAUDO"), (datetime.date, datetime.datetime))
-                else st.session_state.get("DATA_LAUDO"),
-                "questionados_list": st.session_state.get("questionados_list", []),
-                "padroes_list": st.session_state.get("padroes_list", []),
-                "saved_analyses": st.session_state.get("saved_analyses", {}),
-                "anexos": st.session_state.get("anexos", []),
-                "adendos": st.session_state.get("adendos", []),
-                "etapas_concluidas": list(st.session_state.get("etapas_concluidas", [])),
-                "etapa_atual": st.session_state.get("etapa_atual", 1),
-            }
-
-        serializable = _make_serializable(data_to_save)
+        serializable = _make_serializable(payload)
         save_process_data(process_id, serializable)
         return True
     except Exception as e:
         st.error(f"Erro ao salvar estado: {e}")
         return False
 
-
 def load_process(process_id: str) -> bool:
-    """Carrega dados salvos de um processo existente para st.session_state."""
+    """Carrega dados do backend para st.session_state; retorna True se ok."""
     if not BACKEND_OK:
         st.error("Carregamento indisponível: backend não carregado.")
         return False
-
     try:
         dados = load_process_data(process_id)
     except Exception as e:
@@ -202,18 +233,18 @@ def load_process(process_id: str) -> bool:
         return False
 
     if not dados:
-        st.error("Processo não encontrado ou arquivo corrompido.")
+        st.error("Processo não encontrado.")
         return False
 
-    # aplicar dados no session_state com cuidados de tipos
+    # aplica valores no session_state com normalizações
     for k, v in dados.items():
         if k == "etapas_concluidas" and isinstance(v, list):
             st.session_state[k] = set(v)
         elif k == "DATA_LAUDO" and isinstance(v, str):
             try:
-                st.session_state[k] = datetime.date.fromisoformat(v)
+                st.session_state[k] = date.fromisoformat(v)
             except Exception:
-                st.session_state[k] = datetime.date.today()
+                st.session_state[k] = date.today()
         else:
             st.session_state[k] = v
 
@@ -221,25 +252,20 @@ def load_process(process_id: str) -> bool:
     st.session_state["selected_process_id"] = process_id
     return True
 
-
 # ======================================================================
-# GERADOR DE IDs PARA QUESTIONADOS
+# UTILS
 # ======================================================================
-
 
 def gerar_id(short: bool = True) -> str:
-    uid = str(uuid.uuid4())
-    return uid[:8] if short else uid
-
+    idv = str(uuid.uuid4())
+    return idv[:8] if short else idv
 
 def format_process_label(process_id: str) -> str:
-    """Formata exibição da lista de processos."""
+    """Formata a label da lista de processos para exibição no sidebar."""
     if not BACKEND_OK:
         return f"{process_id} — backend indisponível"
     try:
         dados = load_process_data(process_id)
-        if not dados:
-            return f"{process_id} — [Erro ao carregar]"
         autor = dados.get("AUTOR", "N/A")
         reu = dados.get("REU", "N/A")
         return f"{process_id} — Autor: {autor} | Réu: {reu}"
@@ -247,9 +273,41 @@ def format_process_label(process_id: str) -> str:
         return f"{process_id} — [Erro ao acessar dados]"
 
 # ======================================================================
-# FIM DA PARTE 1
-# A PARTIR DAQUI DEVE VIR A PARTE 2 (Editor de imagem, Plot EOG, etc.)
+# TEMA E PAPEL DE PAREDE (CSS dinâmico, independente do backend)
 # ======================================================================
+
+def _render_theme_and_wallpaper_controls():
+    """Renderiza botões para alternar tema e escolher papel de parede."""
+    col_a, col_b = st.columns([1, 3])
+    if col_a.button("🌓 Alternar Tema"):
+        st.session_state.theme_mode = "light" if st.session_state.theme_mode == "dark" else "dark"
+
+    wallpapers = {
+        "Nenhum": "",
+        "Linhas discretas": "background: repeating-linear-gradient(0deg,#333,#333 1px,#222 1px,#222 20px);",
+        "Grade clara": "background: repeating-linear-gradient(0deg,#eee,#eee 1px,#ccc 1px,#ccc 20px);",
+        "Grade escura": "background: repeating-linear-gradient(0deg,#111,#111 1px,#000 1px,#000 20px);"
+    }
+
+    choice = col_b.selectbox("🎨 Papel de Parede", list(wallpapers.keys()), index=list(wallpapers.keys()).index(st.session_state.get("wallpaper_choice", "Nenhum")))
+    st.session_state.wallpaper_choice = choice
+
+    # aplica CSS imediatamente (não depende do backend)
+    css = "<style>body {"
+    if st.session_state.get("theme_mode", "dark") == "light":
+        css += "background-color: #f5f5f5; color: #000;"
+    else:
+        css += "background-color: #1e1e1e; color: #fff;"
+    css += wallpapers.get(choice, "")
+    css += "}</style>"
+
+    st.markdown(css, unsafe_allow_html=True)
+
+# ======================================================================
+# FIM DA PARTE 1
+# ======================================================================
+
+
 
 
 # ======================================================================
