@@ -1,4 +1,4 @@
-# pages/01_Gerar_laudo.py (O MÓDULO INTEGRADO/CONTROLADOR DE FLUXO)
+# 01_Gerar_laudo_Consolidado.py (CÓDIGO MONOLÍTICO)
 
 import streamlit as st
 import os
@@ -13,21 +13,23 @@ from typing import Dict, Any, Set, List, Callable, Union
 from num2words import num2words # Necessário para a lógica do word_handler
 
 # --- Importações dos módulos de backend (Assumindo que estão na pasta 'src') ---
+# Mantendo a importação dos módulos que fazem o trabalho de I/O (salvar/carregar dados, gerar word)
 try:
     # Atenção: Se ocorrer ModuleNotFoundError aqui, certifique-se que o diretório 'src'
-    # está na raiz do projeto e contém um arquivo __init__.py vazio.
+    # está na raiz do projeto e contém um arquivo __init__.py vazio, e que os arquivos
+    # de backend (word_handler, data_handler, db_handler) estão no src.
     from src.word_handler import gerar_laudo
     from src.data_handler import save_process_data, load_process_data
     from src.db_handler import atualizar_status
 except ImportError as e:
-    st.error(f"Erro de Importação: {e}. Certifique-se de que os arquivos 'data_handler.py', 'db_handler.py' e 'word_handler.py' estão na pasta 'src' e que o 'src' está na raiz do projeto.")
+    st.error(f"Erro de Importação de Backend: {e}. Certifique-se de que os arquivos 'data_handler.py', 'db_handler.py' e 'word_handler.py' estão na pasta 'src' e que o 'src' está na raiz do projeto.")
     def gerar_laudo(*args, **kwargs): st.error("Erro: word_handler não carregado.")
     def save_process_data(*args, **kwargs): return False
     def load_process_data(*args, **kwargs): return {}
     def atualizar_status(*args, **kwargs): pass
 
 # --- Configurações de Ambiente (Paths) ---
-# Se '01_Gerar_laudo.py' está em 'pages', PROJECT_ROOT deve subir um nível.
+# Se este arquivo (01_Gerar_laudo_Consolidado.py) estiver na pasta 'pages', PROJECT_ROOT deve subir um nível.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.join(SCRIPT_DIR, '..')
 CAMINHO_MODELO = os.path.join(PROJECT_ROOT, "template", "LAUDO PERICIAL GRAFOTÉCNICO.docx")
@@ -36,18 +38,128 @@ DATA_FOLDER = os.path.join(PROJECT_ROOT, "data")
 os.makedirs(DATA_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# --- Constantes de Etapas (INTEGRADO DE module_0x_...py) ---
-ETAPA_ID_1 = 1 # Apresentação
-ETAPA_ID_2 = 2 # Objetivos
-ETAPA_ID_3 = 3 # Introdução
-ETAPA_ID_4 = 4 # Documentos
-ETAPA_ID_5 = 5 # Análise (EOG/Confronto)
-ETAPA_ID_6 = 6 # Conclusão
-ETAPA_ID_7 = 7 # Quesitos
-ETAPA_ID_8 = 8 # Encerramento
+# --- Funções de Controle de Estado (Do 01_Gerar_laudo.py) ---
 
-# Constantes de Análise (INTEGRADO DE module_05_analise.py)
-EOG_ELEMENTS = {
+def init_session_state():
+    """Inicializa chaves essenciais e corrige o tipo de dados após o carregamento."""
+    
+    # CRÍTICO: 'etapas_concluidas' deve ser um SET para fácil manipulação
+    if 'etapas_concluidas' not in st.session_state:
+        st.session_state.etapas_concluidas = set()
+    elif isinstance(st.session_state.etapas_concluidas, list):
+        # Correção para o caso de carregar de um JSON (que transforma SET em LIST)
+        st.session_state.etapas_concluidas = set(st.session_state.etapas_concluidas)
+
+    # Inicialização de listas de documentos e análises
+    if 'questionados_list' not in st.session_state: st.session_state.questionados_list = []
+    if 'padroes_pce_list' not in st.session_state: st.session_state.padroes_pce_list = []
+    if 'analises_eog_list' not in st.session_state: st.session_state.analises_eog_list = []
+    if 'anexos' not in st.session_state: st.session_state.anexos = []
+    if 'adendos' not in st.session_state: st.session_state.adendos = []
+    
+    # Inicialização de estados dos quesitos (Dict com chave 'list' e 'nao_enviados')
+    if 'quesitos_autora_data' not in st.session_state: 
+        st.session_state.quesitos_autora_data = {"list": [], "nao_enviados": False}
+    if 'quesitos_reu_data' not in st.session_state: 
+        st.session_state.quesitos_reu_data = {"list": [], "nao_enviados": False}
+        
+    # Inicializa flag de carregamento
+    if 'process_loaded' not in st.session_state:
+        st.session_state.process_loaded = False
+        
+    # Variáveis críticas para o word_handler
+    if 'CAMINHO_MODELO' not in st.session_state: 
+        st.session_state.CAMINHO_MODELO = CAMINHO_MODELO
+    
+    # Variáveis de texto final (para o word_handler)
+    if 'BLOCO_CONCLUSAO_DINAMICO' not in st.session_state: st.session_state.BLOCO_CONCLUSAO_DINAMICO = ""
+    if 'BLOCO_QUESITOS_AUTOR' not in st.session_state: st.session_state.BLOCO_QUESITOS_AUTOR = ""
+    if 'BLOCO_QUESITOS_REU' not in st.session_state: st.session_state.BLOCO_QUESITOS_REU = ""
+
+
+def save_current_state() -> bool:
+    """Salva o estado atual do Streamlit (exceto dados temporários) no arquivo JSON do processo."""
+    
+    process_id = st.session_state.get('numero_processo')
+    if not process_id:
+        st.error("Não foi possível salvar: Número de processo ausente.")
+        return False
+        
+    # 1. Copia o estado atual
+    data_to_save = dict(st.session_state)
+    
+    # 2. Limpa dados temporários ou sensíveis à serialização
+    keys_to_exclude = [
+        'process_to_load', 'CAMINHO_MODELO', 'BLOCO_CONCLUSAO_DINAMICO', 
+        'BLOCO_QUESITOS_AUTOR', 'BLOCO_QUESITOS_REU', 
+        'input_JUIZO_DE_DIREITO', 'input_ID_NOMEACAO', 'input_DATA_LAUDO', 
+        # Exclui chaves de controle de widget
+        *(k for k in data_to_save.keys() if k.startswith('input_') or k.startswith('doc_') or k.startswith('anexo_') or k.startswith('quesito_'))
+    ]
+    for key in keys_to_exclude:
+        data_to_save.pop(key, None)
+
+    # 3. Serializa o SET de etapas concluídas para LIST (JSON não suporta SET)
+    if 'etapas_concluidas' in data_to_save:
+        data_to_save['etapas_concluidas'] = list(data_to_save['etapas_concluidas'])
+    
+    # 4. Salva no disco
+    return save_process_data(process_id, data_to_save, DATA_FOLDER)
+
+
+def load_process(process_id: str):
+    """Carrega dados de um processo existente para o st.session_state."""
+    
+    # Garante que o processo existe no banco de dados e está ativo antes de carregar
+    # (A verificação do arquivo JSON é feita dentro do data_handler)
+    try:
+        dados_carregados = load_process_data(process_id, DATA_FOLDER)
+        
+        if dados_carregados:
+            # Limpa o estado atual (para não misturar dados)
+            st.session_state.clear()
+            
+            # Recarrega o estado com os dados do arquivo
+            for key, value in dados_carregados.items():
+                st.session_state[key] = value
+                
+            # Garante que o estado seja inicializado (corrige tipos, etc.)
+            init_session_state()
+            
+            # Seta as flags de carregamento
+            st.session_state.process_loaded = True
+            st.session_state.numero_processo = process_id
+            st.success(f"✅ Processo **{process_id}** carregado com sucesso!")
+            st.rerun()
+        else:
+            st.session_state.process_loaded = False
+            st.error(f"❌ Não há dados salvos para o processo **{process_id}**.")
+    except Exception as e:
+        st.error(f"❌ Erro ao carregar dados: {e}")
+
+# --------------------------------------------------------------------------------
+
+# --- Constantes de Etapas e Globais (INTEGRADO) ---
+ETAPA_ID_1 = 1
+ETAPA_ID_2 = 2 
+ETAPA_ID_3 = 3 
+ETAPA_ID_4 = 4
+ETAPA_ID_5 = 5
+ETAPA_ID_6 = 6
+ETAPA_ID_7 = 7
+ETAPA_ID_8 = 8
+
+# Constantes do Módulo 4: DOCUMENTOS
+TIPO_DOCUMENTO_OPCOES = [ 
+    "Cédula de Identidade", 
+    "Procuração", 
+    "Declaração de Residência", 
+    "Contrato Social",
+    "Outros"
+]
+
+# Constantes do Módulo 5: ANÁLISE PERICIAL
+EOG_ELEMENTS = { 
     "HABILIDADE_VELOCIDADE": "Habilidade e Velocidade",
     "ESPONTANEIDADE_DINAMISMO": "Espontaneidade e Dinamismo",
     "CALIBRE": "Calibre",
@@ -61,100 +173,34 @@ CONFRONTO_ELEMENTS = {
     "ATAQUES_REMATES_5_2": "Ataques e Remates: Modo como o traço se inicia e termina.",
     "PONTOS_CONEXAO": "Pontos de Conexão e Ligação: União entre letras e palavras."
 }
-EOG_STATUS_OPCOES = {
-    "PRESENTE": "Presente e Normal",
-    "PRESENTE_ANOMALO": "Presente com Anomalia",
-    "AUSENTE": "Ausente"
+EOG_OPCOES = {
+    "ADEQUADO": "Adequado / Compatível com o padrão",
+    "DIVERGENTE": "Divergente / Não compatível",
+    "LIMITADO": "Limitação por escassez de material",
+    "PENDENTE": "PENDENTE / Não Avaliado"
 }
-TIPO_DOCUMENTO_OPCOES = [
-    "Cédula de Identidade", "Procuração", "Declaração de Residência", "Contrato Social", "Outros"
-]
-CONCLUSOES_OPCOES = {
+EOG_OPCOES_RADAR = { # para o gráfico de radar
+    "ADEQUADO": 2, # Alto
+    "DIVERGENTE": 0, # Baixo
+    "LIMITADO": 1, # Médio
+    "PENDENTE": 1 # Médio (para não distorcer)
+}
+
+# Constantes do Módulo 6: CONCLUSÃO
+CONCLUSOES_OPCOES = { 
     "AUTENTICA": "Autêntica (Promanou do punho escritor)",
     "FALSA": "Falsa (Não promanou do punho escritor)",
-    "PENDENTE": "PENDENTE / Não Avaliada"
+    "PENDENTE": "PENDENTE / Não Avaliada" # Opção inicial/fallback
 }
+
+# Constantes do Módulo 7: QUESITOS
 NO_QUESITOS_TEXT = "Não foram encaminhados quesitos para resposta para o Perito nomeado."
 
-# --- Funções de Controle de Estado ---
+# --------------------------------------------------------------------------------
 
-def init_session_state():
-    """Inicializa chaves essenciais e corrige o tipo de dados após o carregamento."""
-    
-    # CRÍTICO: 'etapas_concluidas' deve ser um set para permitir a adição (add)
-    if 'etapas_concluidas' not in st.session_state or not isinstance(st.session_state.etapas_concluidas, set):
-        # Converte a lista (se carregada do JSON) para um set (se inicializada)
-        if isinstance(st.session_state.get('etapas_concluidas'), list):
-            st.session_state.etapas_concluidas = set(st.session_state.etapas_concluidas)
-        else:
-            st.session_state.etapas_concluidas = set()
-            
-    # CRÍTICO: Inicialização de listas vazias
-    st.session_state.setdefault('questionados_list', [])
-    st.session_state.setdefault('padroes_pca_list', [])
-    st.session_state.setdefault('padroes_pce_list', [])
-    st.session_state.setdefault('analises_eog_list', [])
-    st.session_state.setdefault('anexos', []) # Usado para imagens do Word
-    st.session_state.setdefault('adendos', []) # Usado para imagens de EOG e Quesitos
-    st.session_state.setdefault('quesitos_autora_data', {'fls': '', 'list': []})
-    st.session_state.setdefault('quesitos_reu_data', {'fls': '', 'list': []})
-    st.session_state.setdefault('process_loaded', False) # Flag de carregamento
-    st.session_state.setdefault('numero_processo', '')
-    st.session_state.setdefault('DATA_LAUDO', date.today())
-    # Campos que o Word Handler espera:
-    st.session_state.setdefault('BLOCO_CONCLUSAO_DINAMICO', '')
-    st.session_state.setdefault('BLOCO_QUESITOS_AUTOR', '')
-    st.session_state.setdefault('BLOCO_QUESITOS_REU', '')
-    st.session_state.setdefault('RESUMO_CABECALHO', '')
+# --- FUNÇÕES AUXILIARES (INTEGRADO) ---
 
-
-def save_current_state():
-    """Salva o estado atual do processo no JSON e atualiza o DB."""
-    if st.session_state.numero_processo:
-        try:
-            # Converte 'etapas_concluidas' para list para ser serializado no JSON
-            temp_etapas = st.session_state.etapas_concluidas
-            st.session_state.etapas_concluidas = list(temp_etapas)
-            
-            save_process_data(st.session_state.numero_processo, st.session_state)
-            
-            # Atualiza a data de modificação no DB para manter o home.py atualizado
-            atualizar_status(st.session_state.numero_processo, st.session_state.get('status', 'Em andamento'))
-            
-            # Converte de volta para set para uso no Streamlit
-            st.session_state.etapas_concluidas = temp_etapas
-            
-            return True
-        except Exception as e:
-            st.error(f"Erro ao salvar: {e}")
-            return False
-    return False
-
-def load_process(process_id: str):
-    """Carrega os dados de um processo existente."""
-    try:
-        dados = load_process_data(process_id)
-        
-        # Copia dados carregados para o session_state
-        for key, value in dados.items():
-            st.session_state[key] = value
-            
-        # Garante a inicialização e correção de tipos (set, date)
-        init_session_state()
-        
-        st.session_state.process_loaded = True
-        st.session_state.numero_processo = process_id
-        
-        st.success(f"Dados do processo **{process_id}** carregados com sucesso!")
-        st.rerun()
-        
-    except FileNotFoundError:
-        st.error(f"❌ Não há dados salvos para o processo **{process_id}**.")
-    except Exception as e:
-        st.error(f"❌ Erro ao carregar dados: {e}")
-
-# --- Funções Auxiliares (INTEGRADO DE module_0x_...py) ---
-
+# Auxiliares de Lista (Módulo 4)
 def add_item(list_key: str, default_data: Dict[str, Any]):
     """Adiciona um novo item à lista de documentos (Questionados ou Padrões)."""
     if list_key not in st.session_state:
@@ -166,18 +212,233 @@ def add_item(list_key: str, default_data: Dict[str, Any]):
 def remove_item(list_key: str, item_id: str):
     """Remove um item da lista de documentos pelo ID."""
     if list_key in st.session_state:
-        st.session_state[list_key] = [item for item in st.session_state[list_key] if item['id'] != item_id]
+        st.session_state[list_key] = [item for item in st.session_state[list_key] if item.get('id') != item_id]
+        st.rerun()
 
+# Auxiliar de Renderização (Módulo 4)
+def render_questionado_form(item: Dict[str, Any], idx: int, save_callback: Callable[[], bool]):
+    """Renderiza o formulário para um Documento Questionado (4.1)."""
+    item_id = item['id']
+    is_saved = item.get('is_saved', False)
+    
+    with st.container(border=True):
+        st.caption(f"Documento Questionado {idx+1}")
+        
+        col_tipo, col_num, col_desc = st.columns([2, 1, 3])
+        
+        item['TIPO_DOCUMENTO'] = col_tipo.text_input(
+            "Tipo do Documento",
+            value=item.get('TIPO_DOCUMENTO', f"Doc. Questionado {idx+1}"),
+            key=f"doc_q_tipo_{item_id}"
+        )
+        item['FLS_DOCUMENTOS'] = col_num.text_input(
+            "Fls.",
+            value=item.get('FLS_DOCUMENTOS', f"10-{idx+10}"),
+            key=f"doc_q_fls_{item_id}"
+        )
+        item['DESCRICAO_IMAGEM'] = col_desc.text_area(
+            "Descrição do Grafismo a Ser Analisado (Ex: Assinatura, rubrica, texto)",
+            value=item.get('DESCRICAO_IMAGEM', "Assinatura contestada"),
+            key=f"doc_q_desc_{item_id}",
+            height=80
+        )
+        
+        col_save, col_delete = st.columns([4, 1])
+        if col_save.button("💾 Salvar Item", key=f"save_doc_q_{item_id}", type="primary"):
+            item['is_saved'] = True
+            if save_callback():
+                st.success(f"Documento Questionado {idx+1} salvo!")
+            else:
+                st.error("Falha ao salvar o estado.")
+            st.rerun()
+            
+        if col_delete.button("🗑️ Excluir", key=f"delete_doc_q_{item_id}", type="secondary"):
+            remove_item("questionados_list", item_id)
+            # Remove a análise associada também
+            st.session_state.analises_eog_list = [a for a in st.session_state.analises_eog_list if a.get('questionado_id') != item_id]
+            st.rerun()
+
+def render_padrao_form(item: Dict[str, Any], idx: int, save_callback: Callable[[], bool]):
+    """Renderiza o formulário para um Documento Padrão (4.2 B)."""
+    item_id = item['id']
+    is_saved = item.get('is_saved', False)
+    
+    with st.container(border=True):
+        st.caption(f"Documento Padrão {idx+1} (Tipo: {item.get('TIPO_DOCUMENTO_OPCAO', 'N/A')})")
+        
+        col_tipo, col_num, col_data = st.columns([2, 1, 2])
+        
+        tipo_selecionado = col_tipo.selectbox(
+            "Tipo do Documento",
+            options=TIPO_DOCUMENTO_OPCOES,
+            index=TIPO_DOCUMENTO_OPCOES.index(item.get('TIPO_DOCUMENTO_OPCAO', TIPO_DOCUMENTO_OPCOES[0])),
+            key=f"doc_p_tipo_select_{item_id}"
+        )
+        item['TIPO_DOCUMENTO_OPCAO'] = tipo_selecionado
+        
+        # Permite campo de texto se for 'Outros'
+        item['TIPO_DOCUMENTO_CUSTOM'] = ""
+        if tipo_selecionado == "Outros":
+            item['TIPO_DOCUMENTO_CUSTOM'] = col_tipo.text_input(
+                "Nome do Documento",
+                value=item.get('TIPO_DOCUMENTO_CUSTOM', 'Outro Documento'),
+                key=f"doc_p_tipo_custom_{item_id}"
+            )
+
+        item['NUMEROS'] = col_num.text_input(
+            "Fls. / Nº do Documento",
+            value=item.get('NUMEROS', 'Fls. X'),
+            key=f"doc_p_num_{item_id}"
+        )
+        
+        # Converte a string de data salva para um objeto date (se for string)
+        data_salva = item.get('DATA_DOCUMENTO')
+        if isinstance(data_salva, str):
+            try:
+                data_obj = datetime.strptime(data_salva, "%d/%m/%Y").date()
+            except ValueError:
+                data_obj = date.today()
+        elif isinstance(data_salva, date):
+            data_obj = data_salva
+        else:
+            data_obj = date.today()
+            
+        data_input = col_data.date_input(
+            "Data do Documento",
+            value=data_obj,
+            key=f"doc_p_data_{item_id}"
+        )
+        item['DATA_DOCUMENTO'] = data_input.strftime("%d/%m/%Y") # Salva como string
+
+        item['DESCRICAO_IMAGEM'] = st.text_area(
+            "Descrição dos Padrões (Ex: Assinaturas no campo 'testemunha')",
+            value=item.get('DESCRICAO_IMAGEM', "Assinatura"),
+            key=f"doc_p_desc_{item_id}",
+            height=80
+        )
+        
+        col_save, col_delete = st.columns([4, 1])
+        if col_save.button("💾 Salvar Item", key=f"save_doc_p_{item_id}", type="primary"):
+            item['is_saved'] = True
+            if save_callback():
+                st.success(f"Documento Padrão {idx+1} salvo!")
+            else:
+                st.error("Falha ao salvar o estado.")
+            st.rerun()
+
+        if col_delete.button("🗑️ Excluir", key=f"delete_doc_p_{item_id}", type="secondary"):
+            remove_item("padroes_pce_list", item_id)
+            st.rerun()
+
+# Auxiliares de Análise (Módulo 5)
+def get_analysis_for_questionado(questionado_id: str, session_state: Dict[str, Any]) -> Dict[str, Any]:
+    """Busca a análise existente para um questionado ou cria uma nova estrutura."""
+    
+    analises_list = session_state.get('analises_eog_list', [])
+    
+    # 1. Tenta encontrar uma análise existente
+    for analysis in analises_list:
+        if analysis.get('questionado_id') == questionado_id:
+            return analysis
+    
+    # 2. Se não encontrar, cria uma nova estrutura
+    new_analysis = {
+        "id": str(uuid.uuid4()),
+        "questionado_id": questionado_id,
+        "is_saved": False,
+        "conclusao_status": "PENDENTE", # Usado no Módulo 6
+        "eog_elements": {key: "PENDENTE" for key in EOG_ELEMENTS.keys()},
+        "confronto_texts": {key: "" for key in CONFRONTO_ELEMENTS.keys()},
+        "descricao_analise": "",
+        "imagem_analise_bytes": None, # Temporário (não serializado no JSON)
+        "tem_imagem_analise": False
+    }
+    
+    # 3. Adiciona na lista principal do session_state
+    session_state.analises_eog_list.append(new_analysis)
+    
+    return new_analysis
+
+def render_radar_chart(eog_data: Dict[str, str]):
+    """Gera um gráfico de radar baseado nos resultados dos EOGs."""
+    
+    # Converte os status em valores numéricos
+    data = {
+        'group': ['Análise EOG'],
+        **{key: [EOG_OPCOES_RADAR.get(status, 1)] for key, status in eog_data.items()}
+    }
+    
+    df = pd.DataFrame(data)
+    
+    categories = list(EOG_ELEMENTS.values())
+    N = len(categories)
+    
+    # Cria uma lista de ângulos
+    angles = [n / float(N) * 2 * 3.14159 for n in range(N)]
+    angles += angles[:1]
+    
+    # Valores numéricos da análise (e fecha o círculo)
+    values = [EOG_OPCOES_RADAR.get(eog_data.get(k, "PENDENTE"), 1) for k in EOG_ELEMENTS.keys()]
+    values += values[:1]
+    categories += categories[:1]
+    
+    fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
+    
+    # Plotagem
+    ax.plot(angles, values, linewidth=2, linestyle='solid', label='Documento Questionado')
+    ax.fill(angles, values, 'blue', alpha=0.25)
+    
+    # Rótulos (Categorias)
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(categories[:-1], fontsize=9)
+    
+    # Rótulos dos níveis (0, 1, 2)
+    ax.set_yticks([0, 1, 2])
+    ax.set_yticklabels(["Divergente", "Limitado/Pendente", "Adequado"], color="grey", size=8)
+    ax.set_ylim(0, 2)
+    
+    # Título
+    ax.set_title('Resumo dos Elementos de Ordem Gráfica (EOG)', size=10, color='grey', y=1.1)
+    
+    st.pyplot(fig)
+
+# Auxiliares de Conclusão (Módulo 6)
 def get_questionado_item(questionado_id: str, questionados_list: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Busca o item de documento questionado pelo ID."""
     return next((item for item in questionados_list if item['id'] == questionado_id), {})
 
-def generate_image_base64(fig: plt.Figure) -> bytes:
-    """Converte a figura Matplotlib para bytes PNG em base64."""
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png")
-    return buf.getvalue()
+def get_final_conclusion_text(session_state: Dict[str, Any]) -> str:
+    """Gera o texto final da conclusão (BLOCO_CONCLUSAO_DINAMICO) baseado nas conclusões individuais salvas."""
+    analises = session_state.get('analises_eog_list', [])
+    questionados = session_state.get('questionados_list', [])
+    
+    if not analises:
+        return "" 
+        
+    conclusoes_text = []
+    
+    for analise in analises:
+        q_id = analise['questionado_id']
+        q_item = get_questionado_item(q_id, questionados)
+        
+        if not q_item: continue
+        
+        status_key = analise.get('conclusao_status')
+        status_text = CONCLUSOES_OPCOES.get(status_key, CONCLUSOES_OPCOES["PENDENTE"])
+        
+        # Texto de conclusão:
+        # Ex: Em relação ao Documento Questionado 1 (Assinatura contestada, Fls. 10), o signatário é levado a CONCLUIR que: Falsa (Não promanou do punho escritor).
+        conclusao_formatada = (
+            f"Em relação ao **{q_item.get('TIPO_DOCUMENTO', 'Documento Questionado')}** "
+            f"(Grafismo: {q_item.get('DESCRICAO_IMAGEM', 'N/A')}, Fls. {q_item.get('FLS_DOCUMENTOS', 'N/A')}), "
+            f"o signatário é levado a CONCLUIR que: **{status_text}**."
+        )
+        conclusoes_text.append(conclusao_formatada)
+        
+    # Junta todas as conclusões em um bloco de texto com quebras de linha
+    return "\n\n".join(conclusoes_text)
 
+# Auxiliares de Quesitos (Módulo 7)
 def get_quesito_id_text(party_name: str, index: int) -> str:
     """Gera o texto de identificação do quesito."""
     return f"Quesito da Parte {party_name} nº {index + 1}"
@@ -191,157 +452,304 @@ def gather_all_references(session_state: Dict[str, Any]) -> List[str]:
         references.append(f"Doc. Questionado {idx+1}: {item.get('TIPO_DOCUMENTO', 'S/N')} (Fls. {item.get('FLS_DOCUMENTOS', 'S/N')})")
         
     # 2. Documentos Padrão (4.2) - PC
-    for idx, item in enumerate(session_state.get('padroes_pca_list', [])):
-        references.append(f"Doc. Padrão Colhido {idx+1}: {item.get('TIPO_DOCUMENTO_OPCAO', 'S/N')} (Fls. {item.get('NUMEROS', 'S/N')})")
-        
-    # 3. Documentos Padrão (4.2) - PCE
     for idx, item in enumerate(session_state.get('padroes_pce_list', [])):
-        references.append(f"Doc. Padrão Autos {idx+1}: {item.get('TIPO_DOCUMENTO_OPCAO', 'S/N')} (Fls. {item.get('NUMEROS', 'S/N')})")
+        tipo = item.get('TIPO_DOCUMENTO_OPCAO', 'S/N')
+        if tipo == "Outros":
+            tipo = item.get('TIPO_DOCUMENTO_CUSTOM', 'Outros')
+        references.append(f"Doc. Padrão {idx+1}: {tipo} (Fls. {item.get('NUMEROS', 'S/N')})")
         
-    # 4. Análises Gráficas (5.0)
+    # 3. Análises EOG (5.1)
     for idx, item in enumerate(session_state.get('analises_eog_list', [])):
-        ref_doc = get_questionado_item(item.get('questionado_id', ''), session_state.get('questionados_list', []))
-        doc_tipo = ref_doc.get('TIPO_DOCUMENTO', 'S/N')
-        references.append(f"Análise Gráfica {idx+1}: {doc_tipo} (Item 5.1/5.2)")
-    
+        q_item = get_questionado_item(item['questionado_id'], session_state.get('questionados_list', []))
+        if q_item:
+            references.append(f"Análise Gráfica ({idx+1}): {q_item.get('TIPO_DOCUMENTO', 'N/A')} (Fls. {q_item.get('FLS_DOCUMENTOS', 'N/A')})")
+            
+    # 4. Blocos de texto de conclusão (6)
+    references.append("6. CONCLUSÃO (Bloco de texto final)")
+
     return references
 
-def add_quesito_item(party_key: str, default_data: Dict[str, Any]):
-    """Adiciona um novo quesito à lista da parte (Autora ou Réu)."""
-    list_key = party_key + '_data'
-    if list_key not in st.session_state:
-        st.session_state[list_key] = {'fls': '', 'list': []}
-        
-    new_item = {"id": str(uuid.uuid4()), **default_data}
-    st.session_state[list_key]['list'].append(new_item)
-
-def remove_quesito_item(party_key: str, item_id: str):
-    """Remove um quesito da lista da parte pelo ID."""
-    list_key = party_key + '_data'
-    if list_key in st.session_state:
-        st.session_state[list_key]['list'] = [item for item in st.session_state[list_key]['list'] if item['id'] != item_id]
-
 def process_quesitos_for_adendos(quesitos_list: List[Dict[str, Any]], party_name: str):
-    """Processa imagens de quesitos e as move para a lista de adendos (para o Word)."""
+    """Processa quesitos com imagem para gerar adendos."""
     
-    # Filtra adendos antigos (se houver) para remover imagens de quesitos da mesma parte
-    st.session_state.adendos = [a for a in st.session_state.adendos if not (a.get('origem') == 'quesito' and a.get('parte') == party_name)]
+    session_state = st.session_state
     
+    # Cria um set de IDs de adendos existentes para esta parte para facilitar a limpeza
+    existing_adendo_ids = {a['id_adendo'] for a in session_state.adendos if a.get('origem') == f'quesito_{party_name.lower()}'}
+    new_adendo_ids = set()
+
     for idx, quesito in enumerate(quesitos_list):
-        if quesito.get('imagem_bytes'):
-            adendo_id = f"Quesito_{party_name}_{idx}"
+        quesito_id = quesito['id']
+        
+        # Se tem bytes e não é um adendo existente, adiciona como novo adendo
+        if quesito.get('imagem_bytes') is not None and quesito_id not in new_adendo_ids:
             
-            # Adiciona a imagem à lista de adendos
-            st.session_state.adendos.append({
-                "origem": "quesito",
-                "parte": party_name,
-                "id_referencia": adendo_id,
-                "descricao": get_quesito_id_text(party_name, idx),
+            adendo_id = str(uuid.uuid4())
+            new_adendo_ids.add(quesito_id) # Marca que já processou a imagem deste quesito
+            
+            # Remove o adendo antigo (se existir) e adiciona o novo (limpa/re-cria)
+            session_state.adendos = [a for a in session_state.adendos if a.get('id_referencia') != quesito_id]
+            
+            # Adiciona o novo adendo
+            session_state.adendos.append({
+                "id_adendo": adendo_id,
+                "origem": f"quesito_{party_name.lower()}",
+                "id_referencia": quesito_id,
+                "descricao": f"{get_quesito_id_text(party_name, idx)} (Imagem de Adendo)",
                 "bytes": quesito['imagem_bytes'],
-                "filename": f"quesito_{party_name.lower()}_{idx+1}.png"
+                "filename": f"quesito_{party_name.lower()}_{idx+1}.png" 
             })
-            # Limpa o campo de bytes para não salvar no JSON
-            quesito.pop('imagem_bytes', None)
             
+            # Limpa o campo de bytes para não salvar no JSON (será salvo na lista de Adendos)
+            quesito.pop('imagem_bytes', None) 
+            quesito['tem_imagem'] = True # Mantém a flag para renderização
+        
+        # Se não tem imagem, mas a flag diz que tinha, limpa o adendo anterior
+        elif quesito.get('imagem_bytes') is None and not quesito.get('tem_imagem', False):
+             session_state.adendos = [a for a in session_state.adendos if a.get('id_referencia') != quesito_id]
+
+
 def generate_quesito_block_text(party_name: str, quesitos_data: Dict[str, Any]) -> str:
-    """Gera o bloco de texto formatado para os Quesitos (Bloco 7)."""
+    """Gera o bloco de texto final para uma parte (Autor ou Réu)."""
     
-    quesitos_list = quesitos_data.get('list', [])
-    
-    if not quesitos_list:
+    if quesitos_data.get('nao_enviados', False):
         return NO_QUESITOS_TEXT
         
-    fls = quesitos_data.get('fls', 'N/A')
-    
-    # Título do Bloco 7
-    bloco_text = f"**Quesitos da Parte {party_name} - Fls. {fls}**\n\n"
-    
-    for idx, item in enumerate(quesitos_list):
-        # Título do Quesito
-        bloco_text += f"**{get_quesito_id_text(party_name, idx)}:**\n"
-        
-        # Resposta (em itálico)
-        bloco_text += f"*R: {item.get('resposta', 'Resposta pendente.')}*\n"
-        
-        # Referência ao Adendo/Anexo
-        if item.get('tem_imagem', False):
-            bloco_text += f"(Ver Adendo Fotográfico nº {idx+1} para a demonstração gráfica.)\n\n"
-        else:
-             bloco_text += "\n" # Espaço após a resposta se não houver imagem
-             
-    return bloco_text.strip() # Remove espaços extras no final
+    quesitos_list = quesitos_data.get('list', [])
+    if not quesitos_list:
+        return NO_QUESITOS_TEXT
 
+    # Título/Identificação (será formatado pelo word_handler no bloco [BLOCO_QUESITOS_XXX])
+    block_text = f"Quesitos da Parte {party_name}"
+    
+    for idx, quesito in enumerate(quesitos_list):
+        # 1. Título do Quesito
+        block_text += f"\n\n**{get_quesito_id_text(party_name, idx)}:**"
+        
+        # 2. Resposta
+        resposta = quesito.get('resposta', 'Resposta Pendente.')
+        block_text += f"\n{resposta}"
+        
+        # 3. Referências (se houver)
+        if quesito.get('referencias'):
+            referencias = "\n".join([f"- {ref}" for ref in quesito['referencias']])
+            block_text += f"\n\nReferências do Perito:\n{referencias}"
+            
+        # 4. Adendo de imagem (se houver)
+        if quesito.get('tem_imagem', False):
+             block_text += f"\n\n(A resposta a este quesito faz referência à Imagem de Adendo de Quesito {idx+1} ao final do Laudo.)"
+             
+    return block_text
+
+def render_quesito_form(quesito: Dict[str, Any], idx: int, party_name: str, fls_text: str, references: List[str]):
+    """Renderiza o formulário para um quesito individual."""
+    
+    quesito_id = quesito['id']
+    st.markdown(f"**{get_quesito_id_text(party_name, idx)}**")
+    
+    col_fls, col_save_state = st.columns([4, 1])
+    
+    # Campo de Folhas (Fls.)
+    quesito['fls'] = col_fls.text_input(
+        "Fls. (Onde o quesito está no processo)",
+        value=quesito.get('fls', fls_text),
+        key=f'quesito_{party_name.lower()}_fls_{quesito_id}'
+    )
+    
+    # Campo de Texto do Quesito (para referência, mas não vai para o laudo)
+    quesito['texto'] = st.text_area(
+        "Texto do Quesito (Referência)",
+        value=quesito.get('texto', f"Quesito {idx+1}"),
+        key=f'quesito_{party_name.lower()}_texto_{quesito_id}',
+        height=70
+    )
+    
+    # Campo de Resposta (Vai para o laudo)
+    quesito['resposta'] = st.text_area(
+        "Resposta do Perito (Texto que irá para o Laudo)",
+        value=quesito.get('resposta', 'Com base nos exames realizados, o Perito responde:'),
+        key=f'quesito_{party_name.lower()}_resposta_{quesito_id}',
+        height=150
+    )
+    
+    # Campo de Referências (Opcional)
+    st.markdown("##### Referências Adicionais do Perito (Opcional)")
+    
+    # Multiselect de referências
+    referencias_selecionadas = st.multiselect(
+        "Selecione as referências que sustentam a resposta (Serão adicionadas no bloco do quesito)",
+        options=references,
+        default=quesito.get('referencias', []),
+        key=f'quesito_{party_name.lower()}_refs_{quesito_id}'
+    )
+    quesito['referencias'] = referencias_selecionadas
+    
+    # Upload de Imagem/Adendo
+    col_img, col_info = st.columns([1, 4])
+    
+    # Verifica se já tem uma imagem salva
+    tem_imagem_previa = quesito.get('tem_imagem', False)
+    
+    uploaded_file = col_img.file_uploader(
+        "Adicionar Imagem (Adendo de Quesito)",
+        type=['png', 'jpg', 'jpeg'],
+        key=f'quesito_{party_name.lower()}_upload_{quesito_id}'
+    )
+    
+    if uploaded_file is not None:
+        file_bytes = uploaded_file.read()
+        quesito['imagem_bytes'] = file_bytes # Salva o objeto binário temporariamente
+        quesito['tem_imagem'] = True
+        col_img.image(file_bytes, caption="Imagem Carregada", use_column_width=True)
+    elif tem_imagem_previa:
+        col_img.info("Adendo de imagem já salvo para este quesito.")
+        
+    if col_save_state.button("🗑️ Excluir Quesito", key=f'delete_quesito_{party_name.lower()}_{quesito_id}', use_container_width=True):
+        remove_item(f'quesitos_{party_name.lower()}_data', quesito_id) # Não funciona remove_item, precisa de ajuste no M7
+        # Remove o quesito manualmente (MÓDULO 7 não usa a função add/remove padrão)
+        quesito_list_key = f'quesitos_{party_name.lower()}_data'
+        if quesito_list_key in st.session_state:
+             st.session_state[quesito_list_key]['list'] = [
+                item for item in st.session_state[quesito_list_key]['list'] if item.get('id') != quesito_id
+            ]
+        st.rerun()
+
+def render_quesitos_party(session_state: Dict[str, Any], party_name: str, fls_text: str, save_callback: Callable[[], bool], references: List[str]):
+    """Renderiza a interface de quesitos para uma parte (Autor/Réu)."""
+    
+    state_key = f'quesitos_{party_name.lower()}_data'
+    
+    # Inicializa o estado se for a primeira vez
+    if state_key not in session_state:
+        session_state[state_key] = {"list": [], "nao_enviados": False}
+        
+    # Coloca o checkbox para 'Não Enviados'
+    nao_enviados = st.checkbox(
+        f"A Parte **{party_name}** não encaminhou quesitos (utilizar o texto padrão: '{NO_QUESITOS_TEXT}')",
+        value=session_state[state_key]['nao_enviados'],
+        key=f'{state_key}_nao_enviados_checkbox'
+    )
+    session_state[state_key]['nao_enviados'] = nao_enviados
+    
+    if nao_enviados:
+        st.info(f"O bloco de resposta para a Parte {party_name} será o texto padrão.")
+        session_state[state_key]['list'] = [] # Limpa a lista
+        return # Fim da renderização para esta parte
+        
+    # Renderiza a lista de quesitos existentes
+    for idx, quesito in enumerate(session_state[state_key]['list']):
+        with st.expander(get_quesito_id_text(party_name, idx), expanded=False):
+            render_quesito_form(quesito, idx, party_name, fls_text, references)
+        
+    # Botão para adicionar novo quesito
+    if st.button(f"➕ Adicionar Quesito da Parte {party_name}", key=f'add_quesito_{party_name.lower()}', type="secondary"):
+        new_quesito = {
+            "id": str(uuid.uuid4()),
+            "fls": fls_text,
+            "texto": f"Quesito {len(session_state[state_key]['list']) + 1} da Parte {party_name}",
+            "resposta": 'Com base nos exames realizados, o Perito responde:',
+            "referencias": [],
+            "imagem_bytes": None,
+            "tem_imagem": False
+        }
+        session_state[state_key]['list'].append(new_quesito)
+        st.rerun()
+
+
+# Auxiliares de Encerramento (Módulo 8)
 def find_anexo_for_questionado(q_id: str, anexos: List[Dict[str, Any]]) -> Dict[str, Any] | None:
     """Encontra o anexo correspondente a um documento questionado pelo ID de referência."""
     # Anexos de documentos questionados devem ter a 'origem' como 'documento_questionado'
     return next((a for a in anexos if a.get('origem') == 'documento_questionado' and a.get('id_referencia') == q_id), None)
 
-def get_final_conclusion_text(session_state: Dict[str, Any]) -> str:
-    """Gera o texto final da conclusão (BLOCO_CONCLUSAO_DINAMICO)."""
+def render_anexo_upload_form(q_item: Dict[str, Any], anexos: List[Dict[str, Any]], session_state: Dict[str, Any], save_callback: Callable[[], bool]):
+    """Renderiza o uploader de anexo para um documento questionado específico."""
     
-    analises = session_state.get('analises_eog_list', [])
+    q_id = q_item['id']
+    anexo_existente = find_anexo_for_questionado(q_id, anexos)
     
-    if not analises:
-        return "Não foi possível emitir uma conclusão pericial devido à ausência de documentos questionados ou análise completa."
-        
-    conclusoes = {}
+    descricao = f"ANEXO para {q_item.get('TIPO_DOCUMENTO', 'Documento')} (Fls. {q_item.get('FLS_DOCUMENTOS', 'N/A')})"
     
-    # Agrupa as conclusões
-    for analise in analises:
-        questionado_id = analise.get('questionado_id', 'S/N')
-        status = analise.get('conclusao_status', 'PENDENTE')
-        
-        # Busca o tipo de documento original
-        q_item = get_questionado_item(questionado_id, session_state.get('questionados_list', []))
-        doc_tipo = q_item.get('TIPO_DOCUMENTO', 'Documento S/N')
-        doc_fls = q_item.get('FLS_DOCUMENTOS', 'Fls. S/N')
-        
-        if status not in conclusoes:
-            conclusoes[status] = []
+    with st.container(border=True):
+        st.caption(descricao)
+        col1, col2 = st.columns([4, 1])
+
+        # Se já existe, mostra o botão de exclusão
+        if anexo_existente:
+            col1.info("Anexo de documento questionado já carregado. Você pode excluí-lo abaixo se necessário.")
             
-        conclusoes[status].append(f"{doc_tipo} de {doc_fls}")
-        
-    text_parts = []
-    
-    if CONCLUSOES_OPCOES['AUTENTICA'] in conclusoes:
-        doc_list = ", ".join(conclusoes[CONCLUSOES_OPCOES['AUTENTICA']])
-        text_parts.append(f"Os lançamentos gráficos contidos nos documentos: **{doc_list}**, **PROMANARAM DO PUNHO ESCRITOR** de {session_state.get('AUTOR', 'N/A')} (ou {session_state.get('REU', 'N/A')}, dependendo do caso), sendo classificados como **AUTÊNTICOS**.")
-        
-    if CONCLUSOES_OPCOES['FALSA'] in conclusoes:
-        doc_list = ", ".join(conclusoes[CONCLUSOES_OPCOES['FALSA']])
-        text_parts.append(f"Os lançamentos gráficos contidos nos documentos: **{doc_list}**, **NÃO PROMANARAM DO PUNHO ESCRITOR** de {session_state.get('AUTOR', 'N/A')} (ou {session_state.get('REU', 'N/A')}, dependendo do caso), sendo classificados como **FALSOS** (ou produzidos por pessoa diversa).")
+            if col2.button("🗑️ Excluir Anexo", key=f'delete_anexo_{q_id}', type="secondary", use_container_width=True):
+                # Remove o anexo da lista
+                session_state.anexos = [a for a in session_state.anexos if a.get('id_referencia') != q_id]
+                if save_callback():
+                    st.success(f"Anexo de {q_item.get('TIPO_DOCUMENTO')} excluído.")
+                st.rerun()
+                
+        # Se não existe, mostra o uploader
+        else:
+            uploaded_file = col1.file_uploader(
+                f"Upload do Arquivo ({'ANEXO'} - PDF/Imagem)",
+                type=['pdf', 'png', 'jpg', 'jpeg'],
+                key=f'anexo_upload_{q_id}'
+            )
 
-    if not text_parts:
-        return "Não foi possível emitir uma conclusão pericial, pois todas as análises estão pendentes ou não salvas."
-        
-    return "\n\n".join(text_parts)
+            if uploaded_file is not None:
+                file_bytes = uploaded_file.read()
+                file_name = uploaded_file.name
 
+                # Adiciona o novo anexo
+                session_state.anexos.append({
+                    "id": str(uuid.uuid4()),
+                    "origem": "documento_questionado",
+                    "id_referencia": q_id, # ID do documento questionado
+                    "descricao": descricao,
+                    "bytes": file_bytes,
+                    "filename": file_name,
+                    "mime_type": uploaded_file.type
+                })
+                
+                if save_callback():
+                    st.success(f"Anexo de {q_item.get('TIPO_DOCUMENTO')} carregado com sucesso!")
+                st.rerun()
+            else:
+                col2.empty() # Não mostra nada na coluna de exclusão
+# --------------------------------------------------------------------------------
 
-# --- Funções de Renderização de Etapas (INTEGRADO DE module_0x_...py) ---
+# --- FUNÇÕES DE RENDERIZAÇÃO DE ETAPAS (INTEGRADO) ---
 
-# RENDERIZAÇÃO 1: APRESENTAÇÃO/OBJETIVOS/INTRODUÇÃO (Blocos 1, 2, 3)
+# RENDERIZAÇÃO 1: APRESENTAÇÃO/OBJETIVOS/INTRODUÇÃO (Blocos 1, 2 e 3)
 def render_etapa_1(session_state: Dict[str, Any], save_callback: Callable[[], bool]):
+    """Renderiza a interface da Etapa 1, englobando o preenchimento de dados fixos dos Blocos 1, 2 e 3."""
     
-    is_completed = ETAPA_ID_1 in session_state.etapas_concluidas
+    ETAPA_TITULO = "1. APRESENTAÇÃO, 2. OBJETIVOS e 3. INTRODUÇÃO"
     
-    with st.expander(f"✅ 1-3. APRESENTAÇÃO, OBJETIVOS e INTRODUÇÃO" if is_completed else f"➡️ 1-3. APRESENTAÇÃO, OBJETIVOS e INTRODUÇÃO", expanded=not is_completed):
+    # Verifica se TODAS as etapas estão concluídas para marcar o módulo visualmente
+    is_completed = ETAPA_ID_1 in session_state.etapas_concluidas and \
+                   ETAPA_ID_2 in session_state.etapas_concluidas and \
+                   ETAPA_ID_3 in session_state.etapas_concluidas
+    
+    with st.expander(f"✅ {ETAPA_TITULO}" if is_completed else f"➡️ {ETAPA_TITULO}", expanded=not is_completed):
         
-        st.markdown("Preencha os dados básicos que serão inseridos nos blocos iniciais e no cabeçalho do laudo.")
+        st.markdown("##### 1. APRESENTAÇÃO E 2. OBJETIVOS")
         
-        with st.form("form_etapa_1"):
-            st.subheader("Informações Básicas do Laudo")
+        # Inicia o formulário para salvar todos os campos de uma vez
+        with st.form("bloco_1_e_2_form"):
+            
+            # Campos de Dados Essenciais (Processo, Partes) - Preenchidos no home.py, apenas exibidos
+            st.info(f"Processo: **{session_state.get('numero_processo', 'N/A')}** | Autor: **{session_state.get('AUTOR', 'N/A')}** | Réu: **{session_state.get('REU', 'N/A')}**")
             
             col1, col2 = st.columns(2)
             
+            # Campo Juízo de Direito (necessário para os Blocos 1 e 2)
             session_state.JUIZO_DE_DIREITO = col1.text_input(
-                "Juízo de Direito",
+                "Juízo de Direito / Autoridade Solicitante",
                 value=session_state.get('JUIZO_DE_DIREITO', 'Excelentíssimo(a) Senhor(a) Doutor(a) Juiz(a) de Direito'),
                 key='input_JUIZO_DE_DIREITO'
             )
             
-            # ID_NOMEACAO (necessário para os Blocos 1, 2 e 7 (título da Etapa 7))
+            # Campo ID_NOMEACAO (necessário para os Blocos 1 e 2)
             session_state.ID_NOMEACAO = col2.text_input(
-                "ID Nomeação (Fls. da Nomeação e Documentos Questionados)",
+                "ID Nomeação (Fls. da Nomeação e Documentos Questionados)", 
                 value=session_state.get('ID_NOMEACAO', '1-2'),
                 key='input_ID_NOMEACAO'
             )
@@ -353,398 +761,424 @@ def render_etapa_1(session_state: Dict[str, Any], save_callback: Callable[[], bo
                 key='input_DATA_LAUDO'
             )
             
-            # Campo para o resumo do cabeçalho
-            resumo_texto = f"Processo: {session_state.get('numero_processo', 'N/A')}\\nAutor: {session_state.get('AUTOR', 'N/A')}\\nRéu: {session_state.get('REU', 'N/A')}"
-            session_state.RESUMO_CABECALHO = st.text_area(
-                 "Prévia do Resumo do Cabeçalho (O Word Handler irá formatar isso)",
-                 value=resumo_texto,
-                 height=100,
-                 key='input_RESUMO_CABECALHO_PREVIEW',
-                 disabled=True
+            st.markdown("---")
+            st.markdown("##### 3. INTRODUÇÃO (Contexto da Perícia)")
+            
+            # Campo ID_PADROES (para o Bloco 3, item 4.2 B)
+            session_state.ID_PADROES = st.text_input(
+                "ID Padrões (Fls. dos Padrões Encontrados nos Autos)", 
+                value=session_state.get('ID_PADROES', '100-110'),
+                key='input_ID_PADROES'
             )
 
+            # Campo ID_AUTORIDADE_COLETORA (para o Bloco 3, item 4.2 A)
+            session_state.ID_AUTORIDADE_COLETORA = st.text_input(
+                "ID Autoridade Coletora (Ex: Perito, Cartório, Delegacia)", 
+                value=session_state.get('ID_AUTORIDADE_COLETORA', 'este Perito'),
+                key='input_ID_AUTORIDADE_COLETORA'
+            )
+
+            session_state.AUTOR_ASSINATURA = st.text_input(
+                "Nome Completo do Autor da Assinatura (Contestada)", 
+                value=session_state.get('AUTOR_ASSINATURA', 'NOME COMPLETO DO AUTOR DA ASSINATURA'),
+                key='input_AUTOR_ASSINATURA'
+            )
+            
             submitted = st.form_submit_button("💾 Salvar Blocos 1, 2 e 3", type="primary")
             
             if submitted:
                 # 1. Marca TODOS os módulos de texto fixo/endereçamento como concluídos
-                session_state.etapas_concluidas.add(ETAPA_ID_1)
+                session_state.etapas_concluidas.add(ETAPA_ID_1) 
                 session_state.etapas_concluidas.add(ETAPA_ID_2)
                 session_state.etapas_concluidas.add(ETAPA_ID_3)
                 
                 # 2. Salva o estado completo
                 if save_callback():
-                    st.success("Informações dos Blocos 1, 2 e 3 salvas com sucesso!")
+                    st.success("Dados de Apresentação, Objetivos e Introdução salvos com sucesso!")
                     st.rerun()
                 else:
                     st.error("Falha ao salvar o estado do processo.")
 
-# RENDERIZAÇÃO 4: DOCUMENTOS (Bloco 4)
 
-# Funções de renderização de formulários de Documentos (Auxiliares do Módulo 4)
-def render_questionado_form(item: Dict[str, Any], idx: int, save_callback: Callable[[], bool]):
-    with st.container(border=True):
-        st.caption(f"Documento Questionado {idx+1}")
-        col_q1, col_q2, col_q3 = st.columns([3, 3, 1])
-
-        item['TIPO_DOCUMENTO'] = col_q1.text_input(
-            "Tipo de Documento",
-            value=item.get('TIPO_DOCUMENTO', 'Contrato'),
-            key=f"q_tipo_{item['id']}"
-        )
-        item['FLS_DOCUMENTOS'] = col_q2.text_input(
-            "Fls. (Números de Fls.)",
-            value=item.get('FLS_DOCUMENTOS', '20-22'),
-            key=f"q_fls_{item['id']}"
-        )
-        
-        # Adiciona campo para imagem do documento questionado (para Anexo)
-        file_bytes = item.get('imagem_obj')
-        uploaded_file = st.file_uploader(
-            "Anexar Imagem do Documento Questionado (Opcional)",
-            type=["png", "jpg", "jpeg"],
-            key=f"q_upload_{item['id']}"
-        )
-        
-        if uploaded_file is not None:
-            file_bytes = uploaded_file.read()
-            item['imagem_obj'] = file_bytes # Salva o objeto binário temporariamente
-
-        if file_bytes:
-            st.image(file_bytes, caption=f"Imagem carregada para {item['TIPO_DOCUMENTO']}", width=100)
-            
-            if st.button("Remover Imagem", key=f"q_remove_img_{item['id']}"):
-                 item.pop('imagem_obj', None)
-                 st.info("Imagem removida. Clique em 'Salvar Documentos' para confirmar.")
-                 st.rerun()
-        
-        if col_q3.button("🗑️ Remover", key=f"q_remove_{item['id']}"):
-            remove_item("questionados_list", item['id'])
-            save_callback()
-            st.rerun()
-
-def render_padrao_form(item: Dict[str, Any], idx: int, save_callback: Callable[[], bool]):
-    with st.container(border=True):
-        st.caption(f"Documento Padrão {idx+1} (Tipo: {item.get('TIPO_DOCUMENTO_OPCAO', 'N/A')})")
-        col_p1, col_p2, col_p3 = st.columns([3, 3, 1])
-        
-        item['TIPO_DOCUMENTO_OPCAO'] = col_p1.selectbox(
-            "Tipo de Documento",
-            options=TIPO_DOCUMENTO_OPCOES,
-            index=TIPO_DOCUMENTO_OPCOES.index(item.get('TIPO_DOCUMENTO_OPCAO', TIPO_DOCUMENTO_OPCOES[0])),
-            key=f"p_tipo_{item['id']}"
-        )
-        item['NUMEROS'] = col_p2.text_input(
-            "Fls. / Local de Colheita",
-            value=item.get('NUMEROS', 'Fls. X'),
-            key=f"p_fls_{item['id']}"
-        )
-        item['DESCRICAO_IMAGEM'] = st.text_input(
-            "Descrição do Lançamento Gráfico (Ex: Assinatura, Rubrica, Escrita Cursiva)",
-            value=item.get('DESCRICAO_IMAGEM', 'Assinatura'),
-            key=f"p_desc_{item['id']}"
-        )
-        
-        if col_p3.button("🗑️ Remover", key=f"p_remove_{item['id']}"):
-            remove_item("padroes_pce_list", item['id'])
-            save_callback()
-            st.rerun()
-
-
+# RENDERIZAÇÃO 4: DOCUMENTOS SUBMETIDOS A EXAME (Bloco 4)
 def render_etapa_4(session_state: Dict[str, Any], save_callback: Callable[[], bool]):
-    is_completed = ETAPA_ID_4 in session_state.etapas_concluidas
+    """Renderiza a interface da Etapa 4 (Documentos Submetidos a Exame)."""
+    
     ETAPA_TITULO = "4. DOCUMENTOS SUBMETIDOS A EXAME"
+    is_completed = ETAPA_ID_4 in session_state.etapas_concluidas
     
     with st.expander(f"✅ {ETAPA_TITULO}" if is_completed else f"➡️ {ETAPA_TITULO}", expanded=not is_completed):
         
-        with st.form("form_etapa_4"):
-            st.subheader("4.1. Documentos Questionados (PQ)")
-            st.info("Adicione todos os documentos que contêm os lançamentos gráficos a serem examinados.")
+        st.markdown("#### 4.1 Documentos Questionados (PQ)")
+        st.info("Cadastre os documentos que contêm o grafismo contestado (Questionados).")
+        
+        # --- 4.1 Documentos Questionados (PQ) ---
+        with st.container(border=True):
             
-            # Renderiza os itens Questionados existentes
+            # Renderiza os itens existentes
             for idx, item in enumerate(session_state.questionados_list):
                 render_questionado_form(item, idx, save_callback)
-            
-            col_add_q, col_save_q = st.columns([1, 4])
-            if col_add_q.button("➕ Adicionar Questionado", key="add_questionado", type="secondary", use_container_width=True):
-                add_item("questionados_list", {"TIPO_DOCUMENTO": "Contrato", "FLS_DOCUMENTOS": "1"})
-                st.rerun()
 
-            st.markdown("---")
-            st.subheader("4.2. Documentos Padrão (PC) - Padrões de Confronto")
+            if not session_state.questionados_list:
+                st.info("Nenhum documento questionado adicionado.")
             
-            # 4.2 A. Padrões Colhidos no Ato Pericial (PCA) - (Geralmente lista vazia)
-            st.caption("A. Padrões Colhidos no Ato Pericial (PCA) - Não editável aqui.")
+            # Botões de Ação para 4.1
+            col_add_pq, col_save_pq = st.columns([1, 4])
             
-            # 4.2 B. Padrões Encontrados nos Autos (PCE)
-            st.markdown("B. Padrões Encontrados nos Autos (PCE)")
+            if col_add_pq.button("➕ Adicionar Questionado (PQ)", key="add_questionado", type="secondary", use_container_width=True):
+                # Adiciona o item e faz um rerun para renderizar o novo campo
+                add_item("questionados_list", {
+                    "TIPO_DOCUMENTO": "Doc. Questionado",
+                    "FLS_DOCUMENTOS": "Fls. X",
+                    "DESCRICAO_IMAGEM": "Assinatura contestada"
+                })
+                st.rerun()
+                
+            if col_save_pq.button("💾 Concluir Etapa 4 (Verificar e Salvar)", key="save_docs_q", type="primary", use_container_width=True):
+                
+                # 1. Verifica se há pelo menos um documento questionado
+                if not session_state.questionados_list:
+                    st.warning("É obrigatório cadastrar pelo menos um **Documento Questionado**.")
+                    return
+                
+                # 2. Verifica se pelo menos um documento padrão (PCE ou PCA) foi cadastrado/marcado
+                is_pca_active = session_state.get('ID_AUTORIDADE_COLETORA', 'este Perito') != '' and session_state.get('COLETA_DE_PADROES_ATIVA', True)
+                is_pce_active = len(session_state.padroes_pce_list) > 0
+                
+                if not is_pca_active and not is_pce_active:
+                    st.warning("É obrigatório cadastrar pelo menos um **Documento Padrão** (PCA ou PCE).")
+                    return
+                
+                # 3. Garante que todos os itens estão salvos individualmente
+                all_q_saved = all(item.get('is_saved', False) for item in session_state.questionados_list)
+                all_p_saved = all(item.get('is_saved', False) for item in session_state.padroes_pce_list)
+                
+                if not all_q_saved or (is_pce_active and not all_p_saved):
+                    st.warning("Salve todos os documentos (Questionados e Padrões) antes de concluir a etapa.")
+                    return
+                
+                # 4. Se tudo OK, salva a etapa
+                session_state.etapas_concluidas.add(ETAPA_ID_4)
+                
+                if save_callback():
+                    st.success("Etapa 4 (Documentos) concluída e salva!")
+                    st.rerun()
+                else:
+                    st.error("Falha ao salvar o estado do processo.")
+                    
+        
+        st.markdown("#### 4.2 Documentos Padrão (PC)")
+        
+        # --- 4.2 A. Padrões Colhidos no Ato Pericial (PCA) ---
+        st.markdown("##### ➡️ A. Padrões Colhidos no Ato Pericial (PCA)")
+        st.info("Se não houve coleta de padrões no ato pericial, desmarque o checkbox.")
+        
+        session_state.COLETA_DE_PADROES_ATIVA = st.checkbox(
+            "Houve Coleta de Padrões no Ato Pericial (PCA)",
+            value=session_state.get('COLETA_DE_PADROES_ATIVA', True),
+            key='pca_checkbox'
+        )
+
+        if session_state.COLETA_DE_PADROES_ATIVA:
+            st.markdown(f"O Perito utilizará o Bloco 4.2 A no laudo, referenciando a autoridade coletora como: **{session_state.get('ID_AUTORIDADE_COLETORA', 'este Perito')}**.")
+        else:
+            st.warning("O Bloco 4.2 A não será incluído no laudo.")
+        
+        st.markdown("---")
+        
+        # --- 4.2 B. Padrões Encontrados nos Autos (PCE) ---
+        st.markdown("##### ➡️ B. Padrões Encontrados nos Autos (PCE)")
+        st.info("Cadastre os documentos que contêm grafismos autênticos do autor (Padrões).")
+        
+        with st.container(border=True):
             
-            # Renderiza os itens Padrão (PCE) existentes
+            # Renderiza os itens existentes
             for idx, item in enumerate(session_state.padroes_pce_list):
                 render_padrao_form(item, idx, save_callback)
 
+            if not session_state.padroes_pce_list:
+                st.info("Nenhum documento padrão (PCE) adicionado.")
+
+            # Botões de Ação para 4.2 B
             col_add_pce, col_save_pce = st.columns([1, 4])
+            
             if col_add_pce.button("➕ Adicionar Padrão (PCE)", key="add_padrao", type="secondary", use_container_width=True):
+                # Adiciona o item e faz um rerun para renderizar o novo campo
                 add_item("padroes_pce_list", {
                     "TIPO_DOCUMENTO_OPCAO": TIPO_DOCUMENTO_OPCOES[0],
                     "NUMEROS": "Fls. X",
+                    "DATA_DOCUMENTO": date.today().strftime("%d/%m/%Y"),
                     "DESCRICAO_IMAGEM": "Assinatura"
                 })
                 st.rerun()
+                
+            if col_save_pce.button("💾 Salvar Documentos Padrão (PCE)", key="save_docs_p", type="primary", use_container_width=True):
+                # Garante que todos os itens estão salvos individualmente
+                all_p_saved = all(item.get('is_saved', False) for item in session_state.padroes_pce_list)
+                
+                if not all_p_saved:
+                    st.warning("Salve todos os Documentos Padrão antes de salvar.")
+                    return
 
-            st.markdown("---")
-            submitted = st.form_submit_button("💾 Salvar Documentos e Prosseguir", type="primary")
-
-            if submitted:
-                # 1. CRÍTICO: Transfere imagens de Questionados para a lista de Anexos
-                session_state.anexos = [a for a in session_state.anexos if a.get('origem') != 'documento_questionado']
-                for item in session_state.questionados_list:
-                    if item.get('imagem_obj'):
-                        # Se houver imagem, adiciona à lista de anexos
-                        session_state.anexos.append({
-                            "origem": "documento_questionado",
-                            "id_referencia": item['id'],
-                            "descricao": f"Documento Questionado: {item['TIPO_DOCUMENTO']} ({item['FLS_DOCUMENTOS']})",
-                            "bytes": item['imagem_obj'],
-                            "filename": f"questionado_{item['id']}.png"
-                        })
-                        # Remove o objeto binário para não salvar no JSON
-                        item.pop('imagem_obj', None)
-                        
-                # 2. Verifica se há pelo menos 1 questionado e 1 padrão
-                if not session_state.questionados_list or not (session_state.padroes_pca_list or session_state.padroes_pce_list):
-                     st.warning("⚠️ É necessário adicionar pelo menos **um Documento Questionado** e **um Documento Padrão** para prosseguir.")
+                if save_callback():
+                    st.success("Documentos Padrão (PCE) salvos!")
+                    st.rerun()
                 else:
-                    session_state.etapas_concluidas.add(ETAPA_ID_4)
-                    
-                    # 3. CRÍTICO: Inicializa a lista de análises para a Etapa 5
-                    # Garante que cada Documento Questionado tenha uma entrada em 'analises_eog_list'
-                    existing_q_ids = {a['questionado_id'] for a in session_state.analises_eog_list}
-                    for q_item in session_state.questionados_list:
-                        if q_item['id'] not in existing_q_ids:
-                             session_state.analises_eog_list.append({
-                                'id': str(uuid.uuid4()),
-                                'questionado_id': q_item['id'],
-                                'is_saved': False,
-                                'conclusao_status': CONCLUSOES_OPCOES['PENDENTE'],
-                                # Inicializa os dicionários de EOG e Confronto
-                                'EOG_STATUS': {key: EOG_STATUS_OPCOES['PRESENTE'] for key in EOG_ELEMENTS},
-                                'CONFRONTO_STATUS': {key: 'CONVERGÊNCIA' for key in CONFRONTO_ELEMENTS},
-                                'obs_eog': '',
-                                'obs_confronto': '',
-                                'imagem_analise_bytes': None # Imagem do gráfico EOG
-                             })
-
-                    if save_callback():
-                        st.success("Documentos e Anexos salvos. Avance para a Análise.")
-                        st.rerun()
-                    else:
-                        st.error("Falha ao salvar o estado do processo.")
+                    st.error("Falha ao salvar o estado do processo.")
 
 
-# RENDERIZAÇÃO 5: ANÁLISE PERICIAL (Bloco 5)
-def render_analise_form(item: Dict[str, Any], save_callback: Callable[[], bool], questionados_options: Dict[str, str], current_questionado_id: str):
-    """Renderiza o formulário de Análise EOG e Confronto."""
-    
-    questionado_id = item.get('questionado_id', 'S/N')
-    questionado_nome = questionados_options.get(questionado_id, 'Documento Desconhecido')
-    is_saved = item.get('is_saved', False)
-    
-    with st.expander(f"{'✅' if is_saved else '➡️'} Análise para: **{questionado_nome}**", expanded=questionado_id == current_questionado_id):
-        
-        # O ID da análise selecionada no st.selectbox
-        selected_id = questionado_id
-
-        # Verifica se o ID do item corresponde ao ID selecionado para renderizar o formulário
-        if selected_id == questionado_id:
-            current_analysis = next(a for a in st.session_state.analises_eog_list if a['questionado_id'] == selected_id)
-            
-            with st.form(f"form_analise_{selected_id}"):
-                
-                st.subheader("5.1. Análise dos Elementos de Ordem Gráfica (EOG)")
-                
-                # Input para EOGs
-                for key, label in EOG_ELEMENTS.items():
-                    current_analysis['EOG_STATUS'][key] = st.selectbox(
-                        f"Status - {label}",
-                        options=list(EOG_STATUS_OPCOES.keys()),
-                        format_func=lambda x: EOG_STATUS_OPCOES[x],
-                        index=list(EOG_STATUS_OPCOES.keys()).index(current_analysis['EOG_STATUS'].get(key, EOG_STATUS_OPCOES['PRESENTE'])),
-                        key=f"eog_{selected_id}_{key}"
-                    )
-                
-                current_analysis['obs_eog'] = st.text_area(
-                    "Observações/Conclusão Parcial (5.1)",
-                    value=current_analysis.get('obs_eog', ''),
-                    key=f"obs_eog_{selected_id}"
-                )
-
-                st.markdown("---")
-                st.subheader("5.2. Confronto Grafoscópico (PQ vs PC)")
-                st.info("Aponte Convergência ou Divergência para cada elemento em relação aos padrões de confronto.")
-                
-                # Input para Confronto
-                for key, label in CONFRONTO_ELEMENTS.items():
-                    current_analysis['CONFRONTO_STATUS'][key] = st.selectbox(
-                        f"Status - {label}",
-                        options=['CONVERGÊNCIA', 'DIVERGÊNCIA'],
-                        index=['CONVERGÊNCIA', 'DIVERGÊNCIA'].index(current_analysis['CONFRONTO_STATUS'].get(key, 'CONVERGÊNCIA')),
-                        key=f"confronto_{selected_id}_{key}"
-                    )
-
-                current_analysis['obs_confronto'] = st.text_area(
-                    "Observações/Conclusão Parcial (5.2)",
-                    value=current_analysis.get('obs_confronto', ''),
-                    key=f"obs_confronto_{selected_id}"
-                )
-                
-                st.markdown("---")
-                st.subheader("Visualização e Anexo do Gráfico EOG")
-                
-                # Lógica para gerar o gráfico de radar (EOG)
-                if st.button("📊 Gerar Gráfico EOG", key=f"generate_chart_{selected_id}", type="secondary"):
-                    
-                    data = {
-                        'elementos': list(EOG_ELEMENTS.values()),
-                        'status': [current_analysis['EOG_STATUS'][key] for key in EOG_ELEMENTS.keys()]
-                    }
-                    df = pd.DataFrame(data)
-                    
-                    # Converte status para valores numéricos para o radar (Apenas como visual, 3 pontos)
-                    status_map = {'PRESENTE': 3, 'PRESENTE_ANOMALO': 2, 'AUSENTE': 1}
-                    df['valor'] = df['status'].map({k: i+1 for i, k in enumerate(EOG_STATUS_OPCOES.keys())}) # 1, 2, 3
-                    
-                    # Configuração do gráfico de radar
-                    categories = df['elementos'].tolist()
-                    values = df['valor'].tolist()
-                    
-                    # Usa o valor máximo para fechar o círculo
-                    values += values[:1]
-                    categories += categories[:1]
-                    
-                    fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
-                    
-                    # Define os ângulos para cada categoria
-                    angles = [n / float(len(categories) - 1) * 2 * 3.14159 for n in range(len(categories) - 1)]
-                    angles += angles[:1]
-                    
-                    # Desenha a área
-                    ax.fill(angles, values, color='red', alpha=0.25)
-                    # Desenha a linha
-                    ax.plot(angles, values, color='red', linewidth=2, linestyle='solid')
-                    
-                    # Ajusta ticks e rótulos
-                    ax.set_xticks(angles[:-1])
-                    ax.set_xticklabels(categories[:-1], size=10, color='gray')
-                    ax.set_yticks([1, 2, 3])
-                    ax.set_yticklabels(["Ausente", "Anomalia", "Presente"], color="grey", size=8)
-                    ax.set_ylim(0, 3)
-                    
-                    plt.title(f'Análise EOG: {questionado_nome}', size=12, y=1.1)
-                    
-                    # Converte figura para bytes para salvar no JSON/Adendos
-                    image_bytes = generate_image_base64(fig)
-                    current_analysis['imagem_analise_bytes'] = image_bytes # Salva em bytes temporariamente
-                    
-                    st.pyplot(fig)
-                    plt.close(fig) # Fecha a figura para liberar memória
-
-                # Exibe a imagem salva (se existir)
-                if current_analysis.get('imagem_analise_bytes'):
-                    st.image(current_analysis['imagem_analise_bytes'], caption="Gráfico EOG a ser anexado.", width=200)
-
-
-                submitted = st.form_submit_button("💾 Salvar Análise e Gráfico (Etapa 5)", type="primary")
-
-                if submitted:
-                    # 1. Transfere a imagem (se gerada) para a lista de Adendos
-                    if current_analysis.get('imagem_analise_bytes'):
-                        adendo_id = f"Analise_{selected_id}"
-                        
-                        # Remove a versão antiga do adendo, se existir
-                        st.session_state.adendos = [a for a in st.session_state.adendos if not (a.get('origem') == 'analise_eog' and a.get('id_referencia') == adendo_id)]
-                        
-                        # Adiciona o novo adendo
-                        st.session_state.adendos.append({
-                            "origem": "analise_eog",
-                            "id_referencia": adendo_id,
-                            "descricao": f"Análise Gráfica Detalhada (5.0) para {questionado_nome}",
-                            "bytes": current_analysis['imagem_analise_bytes'],
-                            "filename": f"analise_eog_{selected_id}.png"
-                        })
-                        
-                        # Remove a chave 'imagem_analise_bytes' da análise para não poluir o JSON
-                        current_analysis.pop('imagem_analise_bytes', None)
-                    
-                    # 2. Marca a análise como salva
-                    current_analysis['is_saved'] = True
-
-                    # 3. Verifica se todas as análises foram salvas (para concluir a etapa)
-                    all_saved = all(item.get('is_saved', False) for item in session_state.analises_eog_list)
-                    if all_saved:
-                        session_state.etapas_concluidas.add(ETAPA_ID_5)
-                    
-                    # 4. Salva o estado completo
-                    if save_callback():
-                        st.success(f"Análise para **{questionado_nome}** salva com sucesso!")
-                        if all_saved:
-                            st.info("✅ Todas as análises de EOG/Confronto foram salvas. Você pode prosseguir para a próxima etapa.")
-                        st.rerun()
-                    else:
-                        st.error("Falha ao salvar o estado do processo.")
-
-
+# RENDERIZAÇÃO 5: EXAMES PERICIAIS E METODOLOGIA (Bloco 5)
 def render_etapa_5(session_state: Dict[str, Any], save_callback: Callable[[], bool]):
-    is_completed = ETAPA_ID_5 in session_state.etapas_concluidas
-    ETAPA_TITULO = "5. EXAMES PERICIAIS E METODOLOGIA"
+    """Renderiza a interface da Etapa 5 (Exames Periciais e Metodologia)."""
     
+    ETAPA_TITULO = "5. EXAMES PERICIAIS E METODOLOGIA"
+    is_completed = ETAPA_ID_5 in session_state.etapas_concluidas
+    
+    # 1. Checa pré-requisito (Etapa 4 concluída)
+    if ETAPA_ID_4 not in session_state.get('etapas_concluidas', set()):
+        st.warning("⚠️ **Etapa 4 Incompleta:** Conclua o cadastro de Documentos (Etapa 4) para iniciar a Análise Pericial.")
+        return
+
+    questionados_list = session_state.get('questionados_list', [])
+    if not questionados_list:
+        st.warning("⚠️ **Documentos Ausentes:** Não há documentos questionados cadastrados para realizar a análise.")
+        return
+        
+    # 2. Cria as opções de Documento Questionado para o SelectBox
+    questionados_options = {
+        item['id']: f"Doc. {idx + 1}: {item.get('TIPO_DOCUMENTO', 'S/N')} (Fls. {item.get('FLS_DOCUMENTOS', 'S/N')})"
+        for idx, item in enumerate(questionados_list)
+    }
+    
+    # 3. Garante que cada Documento Questionado tenha uma entrada em 'analises_eog_list'
+    existing_q_ids = {a['questionado_id'] for a in session_state.analises_eog_list}
+    for q_id in questionados_options.keys():
+        if q_id not in existing_q_ids:
+            get_analysis_for_questionado(q_id, session_state) # Cria a estrutura se não existir
+
     with st.expander(f"✅ {ETAPA_TITULO}" if is_completed else f"➡️ {ETAPA_TITULO}", expanded=not is_completed):
         
-        # Cria um mapeamento de ID do Questionado para o nome para o Selectbox
-        questionados_options = {item['id']: f"{item['TIPO_DOCUMENTO']} ({item['FLS_DOCUMENTOS']})" for item in session_state.questionados_list}
+        st.markdown("##### 5.0 Selecione o Documento para Análise")
         
-        if not questionados_options:
-            st.warning("⚠️ Adicione documentos questionados na Etapa 4 para iniciar a análise.")
-            return
+        selected_id = st.selectbox(
+            "Selecione o Documento Questionado que deseja analisar:",
+            options=list(questionados_options.keys()),
+            format_func=lambda x: questionados_options[x],
+            key='analise_selected_questionado'
+        )
+        
+        if not selected_id:
+            return st.info("Selecione um documento questionado para iniciar a análise.")
+            
+        current_analysis = get_analysis_for_questionado(selected_id, session_state)
+        
+        # 4. Renderiza a análise para o documento selecionado
+        with st.form(f"analise_form_{selected_id}"):
+            
+            st.markdown("---")
+            st.markdown("##### 5.1 Análise dos Paradigmas (EOG - Elementos de Ordem Geral)")
+            
+            # --- Tabela/Inputs para EOG ---
+            eog_data = current_analysis['eog_elements']
+            
+            col_eog1, col_eog2 = st.columns(2)
+            
+            # Coluna 1
+            eog_data["HABILIDADE_VELOCIDADE"] = col_eog1.selectbox(
+                f"1. {EOG_ELEMENTS['HABILIDADE_VELOCIDADE']}",
+                options=list(EOG_OPCOES.keys()),
+                format_func=lambda x: EOG_OPCOES[x],
+                index=list(EOG_OPCOES.keys()).index(eog_data.get("HABILIDADE_VELOCIDADE", "PENDENTE")),
+                key=f'eog_hab_{selected_id}'
+            )
+            eog_data["CALIBRE"] = col_eog1.selectbox(
+                f"3. {EOG_ELEMENTS['CALIBRE']}",
+                options=list(EOG_OPCOES.keys()),
+                format_func=lambda x: EOG_OPCOES[x],
+                index=list(EOG_OPCOES.keys()).index(eog_data.get("CALIBRE", "PENDENTE")),
+                key=f'eog_calibre_{selected_id}'
+            )
+            eog_data["ATAQUES_REMATES"] = col_eog1.selectbox(
+                f"5. {EOG_ELEMENTS['ATAQUES_REMATES']}",
+                options=list(EOG_OPCOES.keys()),
+                format_func=lambda x: EOG_OPCOES[x],
+                index=list(EOG_OPCOES.keys()).index(eog_data.get("ATAQUES_REMATES", "PENDENTE")),
+                key=f'eog_ataques_{selected_id}'
+            )
 
-        st.info("Selecione um documento questionado e preencha a análise dos Elementos de Ordem Gráfica (EOG) e o Confronto Grafoscópico.")
-        
-        # Renderiza a análise para CADA documento questionado
-        for analise_item in session_state.analises_eog_list:
-             render_analise_form(analise_item, save_callback, questionados_options, st.session_state.questionados_list[0]['id']) # Sempre expande o primeiro
+            # Coluna 2
+            eog_data["ESPONTANEIDADE_DINAMISMO"] = col_eog2.selectbox(
+                f"2. {EOG_ELEMENTS['ESPONTANEIDADE_DINAMISMO']}",
+                options=list(EOG_OPCOES.keys()),
+                format_func=lambda x: EOG_OPCOES[x],
+                index=list(EOG_OPCOES.keys()).index(eog_data.get("ESPONTANEIDADE_DINAMISMO", "PENDENTE")),
+                key=f'eog_esp_{selected_id}'
+            )
+            eog_data["ALINHAMENTO_GRAFICO"] = col_eog2.selectbox(
+                f"4. {EOG_ELEMENTS['ALINHAMENTO_GRAFICO']}",
+                options=list(EOG_OPCOES.keys()),
+                format_func=lambda x: EOG_OPCOES[x],
+                index=list(EOG_OPCOES.keys()).index(eog_data.get("ALINHAMENTO_GRAFICO", "PENDENTE")),
+                key=f'eog_alin_{selected_id}'
+            )
+            
+            # --- Radar Chart de EOG ---
+            st.markdown("##### ➡️ Visualização da Análise de EOG")
+            render_radar_chart(eog_data)
+            
+            st.markdown("---")
+            st.markdown("##### 5.2 Confronto Grafoscópico (Elementos de Ordem Genética/Individual)")
+            
+            # --- Tabela/Inputs para Confronto ---
+            confronto_texts = current_analysis['confronto_texts']
+            
+            # Cria 5 campos de texto para os elementos do confronto
+            for key, description in CONFRONTO_ELEMENTS.items():
+                confronto_texts[key] = st.text_area(
+                    description,
+                    value=confronto_texts.get(key, f"Descrição do Confronto para {description}"),
+                    key=f'confronto_text_{key}_{selected_id}',
+                    height=100
+                )
+                
+            st.markdown("---")
+            st.markdown("##### 5.3 Descrição da Análise Detalhada (Opcional - Adendo de Imagem)")
+            
+            # Campo de Descrição de Adendo/Imagem
+            current_analysis['descricao_analise'] = st.text_area(
+                "Descrição Detalhada do Exame (Texto livre, não vai para o laudo, apenas para referência e descrição do adendo)",
+                value=current_analysis.get('descricao_analise', 'Análise detalhada do grafismo...'),
+                key=f'desc_analise_{selected_id}',
+                height=150
+            )
+
+            # Upload de Imagem de Adendo de Análise
+            col_img_up, col_img_info = st.columns([1, 4])
+            uploaded_file = col_img_up.file_uploader(
+                "Adicionar Imagem de Análise (Adendo)",
+                type=['png', 'jpg', 'jpeg'],
+                key=f'analise_upload_adendo_{selected_id}'
+            )
+
+            if uploaded_file is not None:
+                file_bytes = uploaded_file.read()
+                # Salva o objeto binário temporariamente no item de análise
+                current_analysis['imagem_analise_bytes'] = file_bytes
+                current_analysis['tem_imagem_analise'] = True
+                col_img_up.image(file_bytes, caption="Imagem para Adendo Carregada", use_column_width=True)
+            elif current_analysis.get('tem_imagem_analise', False):
+                col_img_info.info("Adendo de imagem de análise já salvo.")
+            
+            # Botão de Salvar
+            submitted = st.form_submit_button("💾 Salvar Análise (5.1 e 5.2)", type="primary")
+
+            if submitted:
+                # 1. Processa a imagem de adendo (se houver)
+                image_bytes = current_analysis.get('imagem_analise_bytes')
+                if image_bytes:
+                    adendo_id = str(uuid.uuid4())
+                    
+                    # Limpa o adendo antigo (se existir)
+                    session_state.adendos = [a for a in session_state.adendos if a.get('origem') != 'analise_eog' or a.get('id_referencia') != selected_id]
+                    
+                    # Adiciona o novo adendo
+                    session_state.adendos.append({
+                        "id_adendo": adendo_id,
+                        "origem": "analise_eog",
+                        "id_referencia": selected_id,
+                        "descricao": f"Análise Gráfica Detalhada (5.0) para {questionados_options[selected_id]}",
+                        "bytes": image_bytes,
+                        "filename": f"analise_{selected_id}.png"
+                    })
+                    
+                    # Remove a chave 'imagem_analise_bytes' da análise para não poluir o JSON
+                    current_analysis.pop('imagem_analise_bytes', None) 
+                
+                # 2. Marca a análise como salva
+                current_analysis['is_saved'] = True
+
+                # 3. Verifica se todas as análises foram salvas (para concluir a etapa)
+                all_saved = all(item.get('is_saved', False) for item in session_state.analises_eog_list)
+                if all_saved:
+                    session_state.etapas_concluidas.add(ETAPA_ID_5)
+                
+                # 4. Salva o estado completo
+                if save_callback():
+                    st.success(f"Análise para **{questionados_options[selected_id]}** salva com sucesso!")
+                    if all_saved:
+                         st.info("✅ Todas as análises de EOG/Confronto foram salvas. Você pode prosseguir para a próxima etapa.")
+                    st.rerun()
+                else:
+                    st.error("Falha ao salvar o estado do processo.")
+
 
 # RENDERIZAÇÃO 6: CONCLUSÃO (Bloco 6)
 def render_etapa_6(session_state: Dict[str, Any], save_callback: Callable[[], bool]):
-    is_completed = ETAPA_ID_6 in session_state.etapas_concluidas
-    ETAPA_TITULO = "6. CONCLUSÃO"
+    """Renderiza a interface da Etapa 6 (Conclusão)."""
     
+    ETAPA_TITULO = "6. CONCLUSÃO"
+    is_completed = ETAPA_ID_6 in session_state.etapas_concluidas
+    
+    # Pré-requisito: Etapa 5 concluída
+    if ETAPA_ID_5 not in session_state.get('etapas_concluidas', set()):
+        st.warning("⚠️ **Etapa 5 Incompleta:** Conclua a Análise Pericial (Etapa 5) para gerar a Conclusão.")
+        return
+
+    analises = session_state.get('analises_eog_list', [])
+    questionados = session_state.get('questionados_list', [])
+    
+    if not analises:
+        st.info("Não há documentos questionados com análise para gerar conclusões.")
+        return
+
     with st.expander(f"✅ {ETAPA_TITULO}" if is_completed else f"➡️ {ETAPA_TITULO}", expanded=not is_completed):
         
-        analises = session_state.get('analises_eog_list', [])
+        st.markdown("##### ➡️ Conclusão Individual para cada Documento Questionado")
+        st.info("Para cada documento analisado, defina a conclusão final.")
         
-        if not analises:
-            st.warning("⚠️ Conclua a Etapa 4 (Documentos) e a Etapa 5 (Análise) antes de gerar a Conclusão.")
-            return
-
-        st.info("Para cada documento analisado, selecione a conclusão pericial final.")
-        
-        with st.form("form_etapa_6"):
+        with st.form("conclusao_form"):
             
-            # Itera sobre CADA item de análise/documento questionado
-            for analise in analises:
-                questionado_id = analise.get('questionado_id', 'S/N')
-                q_item = get_questionado_item(questionado_id, session_state.get('questionados_list', []))
-                doc_nome = f"{q_item.get('TIPO_DOCUMENTO', 'S/N')} (Fls. {q_item.get('FLS_DOCUMENTOS', 'S/N')})"
+            for idx, analise in enumerate(analises):
+                q_id = analise['questionado_id']
+                q_item = get_questionado_item(q_id, questionados)
                 
+                if not q_item:
+                    st.warning(f"Documento questionado de ID {q_id} não encontrado. Ignorando.")
+                    continue
+                
+                st.markdown(f"**Documento Questionado {idx+1}:** {q_item.get('TIPO_DOCUMENTO', 'N/A')} (Fls. {q_item.get('FLS_DOCUMENTOS', 'N/A')})")
+                
+                # Input de Status
                 analise['conclusao_status'] = st.selectbox(
-                    f"Conclusão para: **{doc_nome}**",
+                    "Resultado da Perícia:",
                     options=list(CONCLUSOES_OPCOES.keys()),
                     format_func=lambda x: CONCLUSOES_OPCOES[x],
-                    index=list(CONCLUSOES_OPCOES.keys()).index(analise.get('conclusao_status', CONCLUSOES_OPCOES['PENDENTE'])),
-                    key=f"conclusao_{analise['id']}"
+                    index=list(CONCLUSOES_OPCOES.keys()).index(analise.get('conclusao_status', "PENDENTE")),
+                    key=f'conclusao_status_{q_id}'
                 )
-
-            st.markdown("---")
-            submitted = st.form_submit_button("💾 Gerar Bloco de Conclusão e Salvar", type="primary")
+                
+                # Input de Justificativa
+                analise['justificativa_conclusao'] = st.text_area(
+                    "Justificativa para a Conclusão (Texto Opcional, para consulta interna)",
+                    value=analise.get('justificativa_conclusao', 'Justificar se a conclusão é Autêntica ou Falsa.'),
+                    key=f'justificativa_conclusao_{q_id}',
+                    height=100
+                )
+                
+                # Mensagens de alerta específicas
+                if analise['conclusao_status'] == "FALSA":
+                    analise['is_simulacao'] = st.checkbox(
+                        "Adicionar texto sobre 'Esforço e simulação por terceiro' no bloco de justificativa (Texto que vai para o laudo)",
+                        value=analise.get('is_simulacao', False),
+                        key=f'simulacao_checkbox_{q_id}'
+                    )
+                else:
+                    # Garante que a chave não existe se o status não for FALSA
+                    analise.pop('is_simulacao', None) 
+                
+                st.markdown("---")
+                
+            submitted = st.form_submit_button("💾 Gerar e Salvar Conclusão Final", type="primary")
 
             if submitted:
                 # 1. Verifica se todos foram avaliados (não podem ser PENDENTE)
@@ -772,110 +1206,57 @@ def render_etapa_6(session_state: Dict[str, Any], save_callback: Callable[[], bo
         if ETAPA_ID_6 in session_state.etapas_concluidas:
             st.markdown("##### Prévia do Texto de Conclusão (Bloco 6)")
             st.info("O texto abaixo será inserido no laudo, no campo **[BLOCO_CONCLUSAO_DINAMICO]**.")
-            st.markdown(session_state.get('BLOCO_CONCLUSAO_DINAMICO', 'N/A'), unsafe_allow_html=True)
+            st.markdown(session_state.get('BLOCO_CONCLUSAO_DINAMICO', 'N/A'))
 
 
-# RENDERIZAÇÃO 7: QUESITOS (Bloco 7)
-def render_quesito_form(party_name: str, item: Dict[str, Any], idx: int, save_callback: Callable[[], bool]):
-    
-    with st.container(border=True):
-        st.caption(get_quesito_id_text(party_name, idx))
-        
-        item['resposta'] = st.text_area(
-            "Resposta Pericial",
-            value=item.get('resposta', 'Após análise...'),
-            key=f"q_resp_{party_name}_{item['id']}"
-        )
-
-        st.markdown("---")
-        
-        # Opções de Referência
-        col_ref, col_img, col_rem = st.columns([4, 2, 1])
-        
-        # Referências
-        col_ref.selectbox(
-            "Referências para a Resposta (Consulta)",
-            options=gather_all_references(st.session_state),
-            key=f"q_ref_{party_name}_{item['id']}"
-        )
-        
-        # Imagem para Adendo Fotográfico
-        file_bytes = item.get('imagem_bytes')
-        uploaded_file = col_img.file_uploader(
-            "Anexar Imagem para Adendo",
-            type=["png", "jpg", "jpeg"],
-            key=f"q_upload_img_{party_name}_{item['id']}"
-        )
-        
-        if uploaded_file is not None:
-            file_bytes = uploaded_file.read()
-            item['imagem_bytes'] = file_bytes # Salva o objeto binário temporariamente
-            item['tem_imagem'] = True
-            col_img.image(file_bytes, caption="Imagem Adendo", width=50)
-
-        # Lidar com remoção de imagem/item
-        if file_bytes and col_img.button("Remover Imagem", key=f"q_rem_img_{party_name}_{item['id']}", use_container_width=True):
-             item.pop('imagem_bytes', None)
-             item['tem_imagem'] = False
-             st.info("Imagem removida. Clique em 'Salvar' para confirmar.")
-             st.rerun()
-             
-        if col_rem.button("🗑️ Remover Quesito", key=f"q_remove_{party_name}_{item['id']}"):
-            remove_quesito_item(f"quesitos_{party_name.lower()}a" if party_name == 'Autora' else f"quesitos_{party_name.lower()}", item['id'])
-            save_callback()
-            st.rerun()
-
-
+# RENDERIZAÇÃO 7: RESPOSTA AOS QUESITOS (Bloco 7)
 def render_etapa_7(session_state: Dict[str, Any], save_callback: Callable[[], bool]):
+    """Renderiza a interface da Etapa 7 (Resposta aos Quesitos)."""
+
+    ETAPA_TITULO = "7. RESPOSTA AOS QUESITOS"
     is_completed = ETAPA_ID_7 in session_state.etapas_concluidas
-    ETAPA_TITULO = f"7. RESPOSTA AOS QUESITOS (Fls. {session_state.get('ID_NOMEACAO', 'N/A')})"
     
+    # Pré-requisito: Etapa 6 concluída
+    if ETAPA_ID_6 not in session_state.get('etapas_concluidas', set()):
+        st.warning("⚠️ **Etapa 6 Incompleta:** Conclua a Conclusão (Etapa 6) para iniciar a Resposta aos Quesitos.")
+        return
+    
+    # Coleta todas as referências possíveis
+    references = gather_all_references(session_state)
+
     with st.expander(f"✅ {ETAPA_TITULO}" if is_completed else f"➡️ {ETAPA_TITULO}", expanded=not is_completed):
         
-        if ETAPA_ID_6 not in session_state.etapas_concluidas:
-             st.warning("⚠️ Conclua a Etapa 6 (Conclusão) antes de responder aos Quesitos.")
-             return
-        
-        with st.form("form_etapa_7"):
+        with st.form("quesitos_form"):
             
-            # --- QUESITOS DA AUTORA ---
-            st.subheader("Quesitos da Parte Autora")
-            session_state.quesitos_autora_data['fls'] = st.text_input(
-                "Fls. dos Quesitos da Autora",
-                value=session_state.quesitos_autora_data.get('fls', '1-2'),
-                key='q_autora_fls'
+            # --- 7.1 Quesitos da Parte Autora ---
+            st.markdown("#### 7.1 Quesitos da Parte Autora")
+            render_quesitos_party(
+                session_state=session_state,
+                party_name="Autora",
+                fls_text=f"Fls. {session_state.get('ID_NOMEACAO', '1-2')}", # Usa Fls. da Nomeação como padrão
+                save_callback=save_callback,
+                references=references
             )
             
-            for idx, item in enumerate(session_state.quesitos_autora_data['list']):
-                 render_quesito_form("Autora", item, idx, save_callback)
-
-            col_add_a, _ = st.columns([1, 4])
-            if col_add_a.button("➕ Adicionar Quesito Autora", key="add_quesito_autora", type="secondary"):
-                add_quesito_item("quesitos_autora", {"resposta": "Resposta pericial...", "tem_imagem": False})
-                st.rerun()
-
             st.markdown("---")
-            # --- QUESITOS DO RÉU ---
-            st.subheader("Quesitos da Parte Ré")
-            session_state.quesitos_reu_data['fls'] = st.text_input(
-                "Fls. dos Quesitos da Ré",
-                value=session_state.quesitos_reu_data.get('fls', '3-4'),
-                key='q_reu_fls'
+
+            # --- 7.2 Quesitos da Parte Ré ---
+            st.markdown("#### 7.2 Quesitos da Parte Ré")
+            render_quesitos_party(
+                session_state=session_state,
+                party_name="Réu",
+                fls_text="Fls. 50-60", # Placeholder para Fls. do Réu
+                save_callback=save_callback,
+                references=references
             )
             
-            for idx, item in enumerate(session_state.quesitos_reu_data['list']):
-                 render_quesito_form("Réu", item, idx, save_callback)
-
-            col_add_r, _ = st.columns([1, 4])
-            if col_add_r.button("➕ Adicionar Quesito Réu", key="add_quesito_reu", type="secondary"):
-                add_quesito_item("quesitos_reu", {"resposta": "Resposta pericial...", "tem_imagem": False})
-                st.rerun()
-            
             st.markdown("---")
+            
             submitted = st.form_submit_button("💾 Salvar Respostas aos Quesitos", type="primary")
 
             if submitted:
-                # 1. Processa imagens e move para a lista de adendos (para o Word)
+                
+                # 1. Processa as imagens de quesitos para gerar adendos
                 process_quesitos_for_adendos(session_state.quesitos_autora_data.get('list', []), "Autora")
                 process_quesitos_for_adendos(session_state.quesitos_reu_data.get('list', []), "Réu")
                 
@@ -892,6 +1273,7 @@ def render_etapa_7(session_state: Dict[str, Any], save_callback: Callable[[], bo
                     st.rerun()
                 else:
                     st.error("Falha ao salvar o estado do processo.")
+                    
         
         # Prévia dos Blocos (após salvar)
         if ETAPA_ID_7 in session_state.etapas_concluidas:
@@ -900,92 +1282,130 @@ def render_etapa_7(session_state: Dict[str, Any], save_callback: Callable[[], bo
             
             st.markdown("---")
             st.markdown("###### Bloco Quesitos Autora (`[BLOCO_QUESITOS_AUTOR]`)")
-            st.markdown(session_state.get('BLOCO_QUESITOS_AUTOR', 'N/A'), unsafe_allow_html=True)
+            st.markdown(session_state.get('BLOCO_QUESITOS_AUTOR', 'N/A'))
+            
+            st.markdown("---")
             st.markdown("###### Bloco Quesitos Réu (`[BLOCO_QUESITOS_REU]`)")
-            st.markdown(session_state.get('BLOCO_QUESITOS_REU', 'N/A'), unsafe_allow_html=True)
+            st.markdown(session_state.get('BLOCO_QUESITOS_REU', 'N/A'))
 
 
-# RENDERIZAÇÃO 8: ENCERRAMENTO E GERAÇÃO (Bloco 8)
+# RENDERIZAÇÃO 8: ENCERRAMENTO E GERAÇÃO DO LAUDO (Bloco 8)
 def render_etapa_8(session_state: Dict[str, Any], save_callback: Callable[[], bool], project_root: str):
-    is_completed = ETAPA_ID_8 in session_state.etapas_concluidas
+    """Renderiza a interface da Etapa 8 (Encerramento)."""
+    
     ETAPA_TITULO = "8. ENCERRAMENTO E GERAÇÃO DO LAUDO"
+    is_completed = ETAPA_ID_8 in session_state.etapas_concluidas
+    
+    # Pré-requisito: Etapa 7 concluída
+    if ETAPA_ID_7 not in session_state.get('etapas_concluidas', set()):
+        st.warning("⚠️ **Etapa 7 Incompleta:** Conclua a Resposta aos Quesitos (Etapa 7) para iniciar o Encerramento.")
+        return
 
-    with st.expander(f"✅ {ETAPA_TITULO}" if is_completed else f"➡️ {ETAPA_TITULO}", expanded=not is_completed):
+    with st.expander(f"✅ {ETAPA_TITULO}" if is_completed else f"➡️ {ETAPA_TITULO}", expanded=True):
         
-        # Pré-requisito: Etapa 7 concluída
-        if ETAPA_ID_7 not in session_state.get('etapas_concluidas', set()):
-            st.warning("⚠️ **Etapa 7 Incompleta:** Conclua a Resposta aos Quesitos (Etapa 7) para iniciar o Encerramento.")
-            return
+        st.markdown("##### ➡️ Anexos de Documentos Questionados (Etapa 4.1)")
+        questionados = session_state.get('questionados_list', [])
+        anexos = session_state.get('anexos', [])
+        
+        if not questionados:
+            st.info("Nenhum documento questionado cadastrado na Etapa 4.")
+        else:
+            for q_item in questionados:
+                render_anexo_upload_form(q_item, anexos, session_state, save_callback)
+                
+        st.markdown("---")
 
-        st.info("Confirme os dados e gere o arquivo final do Laudo Pericial.")
+        st.markdown("##### ➡️ Adendos (Imagens de Análise e Quesitos)")
+        adendos = session_state.get('adendos', [])
+        
+        if not adendos:
+            st.info("Nenhum adendo de imagem (Análise ou Quesitos) foi gerado.")
+        else:
+            st.caption(f"Total de {len(adendos)} adendos gerados.")
+            
+            for adendo in adendos:
+                st.markdown(f"* 🖼️ **{adendo.get('descricao', 'Adendo Sem Descrição')}** (Origem: {adendo.get('origem', 'N/A')})")
 
-        # --- Prévia dos Itens a Serem Inseridos ---
-        st.subheader("Prévia dos Itens Dinâmicos")
+        st.markdown("---")
+
+        st.markdown("##### ➡️ Geração Final")
         
-        # 1. Lista de Anexos
-        st.markdown(f"**Anexos de Documentos Questionados:** {len([a for a in session_state.anexos if a.get('origem') == 'documento_questionado'])} arquivos.")
-        
-        # 2. Lista de Adendos (EOG e Quesitos)
-        st.markdown(f"**Adendos Fotográficos:** {len([a for a in session_state.adendos if a.get('origem') in ['analise_eog', 'quesito']])} arquivos.")
-        
+        # Última chance de salvar os anexos (se tiver)
+        if st.button("💾 Salvar Anexos e Adendos (Pré-Geração)", key="save_anexos", type="secondary"):
+            if save_callback():
+                st.success("Dados de encerramento salvos!")
+                st.rerun()
+            else:
+                st.error("Falha ao salvar o estado do processo.")
+                
         st.markdown("---")
         
-        with st.form("form_etapa_8"):
-            st.markdown("Clique abaixo para gerar o arquivo `.docx` final.")
-            submitted = st.form_submit_button("🚀 Gerar e Finalizar Laudo", type="primary")
-
-            if submitted:
-                # 1. Monta os dados simples para o Word Handler
-                dados_para_word = {
-                    key: session_state.get(key)
-                    for key in ['numero_processo', 'AUTOR', 'REU', 'JUIZO_DE_DIREITO', 'ID_NOMEACAO', 'DATA_LAUDO', 
-                                'BLOCO_CONCLUSAO_DINAMICO', 'BLOCO_QUESITOS_AUTOR', 'BLOCO_QUESITOS_REU']
-                }
-
-                # Adiciona dados da lista de documentos (apenas os campos principais)
-                # OBS: O word_handler deve buscar os dados complexos (listas) do session_state, mas aqui passamos os dados simples
-                dados_para_word['questionados_list'] = session_state.questionados_list
-                dados_para_word['padroes_pce_list'] = session_state.padroes_pce_list
+        if st.button("🚀 GERAR LAUDO FINAL (.DOCX)", key="generate_laudo", type="primary"):
+            
+            # 1. Prepara os dados para o word_handler
+            dados_para_word = {
+                'NUMERO_PROCESSO': session_state.get('numero_processo', 'N/A'),
+                'AUTOR': session_state.get('AUTOR', 'N/A'),
+                'REU': session_state.get('REU', 'N/A'),
+                'JUIZO_DE_DIREITO': session_state.get('JUIZO_DE_DIREITO', 'N/A'),
+                'ID_NOMEACAO': session_state.get('ID_NOMEACAO', 'N/A'),
+                'DATA_LAUDO': session_state.get('DATA_LAUDO', date.today()).strftime("%d/%m/%Y"),
+                'ID_PADROES': session_state.get('ID_PADROES', 'N/A'),
+                'ID_AUTORIDADE_COLETORA': session_state.get('ID_AUTORIDADE_COLETORA', 'N/A'),
+                'AUTOR_ASSINATURA': session_state.get('AUTOR_ASSINATURA', 'N/A'),
+                'COLETA_DE_PADROES_ATIVA': session_state.get('COLETA_DE_PADROES_ATIVA', True),
                 
-                # 2. Caminhos de Geração
-                nome_laudo = f"LAUDO_{session_state.numero_processo.replace('.', '_').replace('-', '_')}_{date.today().strftime('%Y%m%d')}"
-                caminho_saida = os.path.join(OUTPUT_FOLDER, f"{nome_laudo}.docx")
-                caminho_modelo = CAMINHO_MODELO
+                # Listas
+                'questionados_list': session_state.get('questionados_list', []),
+                'padroes_pce_list': session_state.get('padroes_pce_list', []),
+                'analises_eog_list': session_state.get('analises_eog_list', []),
                 
-                try:
-                    # 3. Chama o Word Handler
-                    gerar_laudo(
-                        caminho_modelo=caminho_modelo,
-                        caminho_saida=caminho_saida,
-                        dados=dados_para_word,
-                        anexos=session_state.anexos,
-                        adendos=session_state.adendos
+                # Blocos de texto finais
+                'BLOCO_CONCLUSAO_DINAMICO': session_state.get('BLOCO_CONCLUSAO_DINAMICO', ''),
+                'BLOCO_QUESITOS_AUTOR': session_state.get('BLOCO_QUESITOS_AUTOR', ''),
+                'BLOCO_QUESITOS_REU': session_state.get('BLOCO_QUESITOS_REU', '')
+            }
+            
+            # 2. Define caminhos
+            now = datetime.now().strftime("%Y%m%d_%H%M%S")
+            caminho_saida = os.path.join(OUTPUT_FOLDER, f"{session_state.numero_processo}_LAUDO_{now}.docx")
+            caminho_modelo = session_state.get('CAMINHO_MODELO', f"{project_root}/template/LAUDO PERICIAL GRAFOTÉCNICO.docx")
+            
+            # 3. Executa a geração
+            try:
+                gerar_laudo(
+                    caminho_modelo=caminho_modelo,
+                    caminho_saida=caminho_saida,
+                    dados=dados_para_word,
+                    anexos=session_state.anexos,
+                    adendos=session_state.adendos
+                )
+                
+                # 4. Finaliza
+                session_state.etapas_concluidas.add(ETAPA_ID_8)
+                
+                if save_callback():
+                    st.success(f"Laudo **{session_state.numero_processo}** gerado e salvo com sucesso! Baixe o arquivo abaixo.")
+                
+                # Adiciona botão de download
+                with open(caminho_saida, "rb") as file:
+                    st.download_button(
+                        label="⬇️ Baixar Laudo .DOCX",
+                        data=file,
+                        file_name=caminho_saida.split('/')[-1],
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     )
-                    
-                    # 4. Finaliza
-                    session_state.etapas_concluidas.add(ETAPA_ID_8)
-                    session_state.status = 'Finalizado'
-                    
-                    if save_callback():
-                        st.success(f"Laudo **{session_state.numero_processo}** gerado e salvo com sucesso! Baixe o arquivo abaixo.")
-                    
-                    # 5. Adiciona botão de download
-                    with open(caminho_saida, "rb") as file:
-                        st.download_button(
-                            label="⬇️ Baixar Laudo .DOCX",
-                            data=file,
-                            file_name=os.path.basename(caminho_saida),
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                        )
-                    st.rerun()
+                # st.rerun() # Não é estritamente necessário se o download for o último passo
+                st.balloons()
 
-                except FileNotFoundError:
-                    st.error(f"❌ Erro de Arquivo: O arquivo de modelo não foi encontrado. Verifique se o arquivo 'LAUDO PERICIAL GRAFOTÉCNICO.docx' está na pasta 'template' na raiz do projeto.")
-                except Exception as e:
-                    st.error(f"❌ Erro na Geração do Laudo: {e}")
+            except FileNotFoundError:
+                st.error(f"❌ Erro de Arquivo: O arquivo de modelo não foi encontrado. Caminho esperado: `{caminho_modelo}`.")
+            except Exception as e:
+                st.error(f"❌ Erro na Geração do Laudo: {e}")
 
-
-# --- Dashboard (O Fluxo Principal) ---
+# --------------------------------------------------------------------------------
+# --- DASHBOARD PRINCIPAL (EXECUÇÃO) ---
+# --------------------------------------------------------------------------------
 
 init_session_state()
 
@@ -1008,40 +1428,55 @@ st.markdown("---")
 
 if st.session_state.process_loaded:
     st.header(f"Processo Atual: `{st.session_state.numero_processo}`")
-    st.caption(f"Autor: {st.session_state.get('AUTOR', 'N/A')} | Réu: {st.session_state.get('REU', 'N/A')} | Fls. Nomeação: {st.session_state.get('ID_NOMEACAO', 'N/A')}")
-    st.markdown("---")
+    st.caption(f"Autor: {st.session_state.get('AUTOR', 'N/A')} | Réu: {st.session_state.get('REU', 'N/A')}")
+    st.caption(f"Juízo: {st.session_state.get('JUIZO_DE_DIREITO', 'N/A')}")
+    
+    # Função auxiliar para o fluxo sequencial
+    def save_current_state_and_log():
+        """Função wrapper para salvar e garantir a exibição de logs."""
+        return save_current_state()
 
-    # O FLUXO DE TRABALHO: RENDERIZA A PRÓXIMA ETAPA INCOMPLETA
-
-    # MÓDULO 1, 2, 3: APRESENTAÇÃO/OBJETIVOS/INTRODUÇÃO (Blocos 1, 2, 3 - Etapa 1)
-    if not (ETAPA_ID_1 in st.session_state.etapas_concluidas and ETAPA_ID_2 in st.session_state.etapas_concluidas and ETAPA_ID_3 in st.session_state.etapas_concluidas):
-        render_etapa_1(st.session_state, save_current_state)
+    # RENDERIZAÇÃO 1, 2, 3: APRESENTAÇÃO/OBJETIVOS/INTRODUÇÃO (Blocos 1, 2 e 3 - Etapas 1, 2, 3)
+    if ETAPA_ID_1 not in st.session_state.etapas_concluidas:
+        st.info("Inicie preenchendo as informações de Apresentação/Objetivos/Introdução (Etapas 1, 2 e 3).")
+        render_etapa_1(st.session_state, save_current_state_and_log)
     
     # MÓDULO 4: DOCUMENTOS (Bloco 4 - Etapa 4)
     elif ETAPA_ID_4 not in st.session_state.etapas_concluidas:
         st.info("✅ Dados iniciais concluídos. Avance para a Etapa 4.")
-        render_etapa_4(st.session_state, save_current_state)
-    
+        render_etapa_4(st.session_state, save_current_state_and_log)
+
     # MÓDULO 5: ANÁLISE PERICIAL (Bloco 5 - Etapa 5)
     elif ETAPA_ID_5 not in st.session_state.etapas_concluidas:
         st.info("✅ Documentos cadastrados. Avance para a Etapa 5.")
-        render_etapa_5(st.session_state, save_current_state)
+        render_etapa_5(st.session_state, save_current_state_and_log)
 
     # MÓDULO 6: CONCLUSÃO (Bloco 6 - Etapa 6)
     elif ETAPA_ID_6 not in st.session_state.etapas_concluidas:
         st.info("✅ Análise EOG/Confronto concluída. Avance para a Etapa 6.")
-        render_etapa_6(st.session_state, save_current_state)
+        render_etapa_6(st.session_state, save_current_state_and_log)
         
     # MÓDULO 7: RESPOSTA AOS QUESITOS (Bloco 7 - Etapa 7)
     elif ETAPA_ID_7 not in st.session_state.etapas_concluidas:
         st.info("✅ Conclusão finalizada. Avance para a Etapa 7.")
-        render_etapa_7(st.session_state, save_current_state)
-
+        render_etapa_7(st.session_state, save_current_state_and_log)
+        
     # MÓDULO 8: ENCERRAMENTO (Bloco 8 - Etapa 8)
     elif ETAPA_ID_8 not in st.session_state.etapas_concluidas:
-        st.info("✅ Resposta aos Quesitos concluída. Avance para a Etapa 8.")
-        render_etapa_8(st.session_state, save_current_state, PROJECT_ROOT)
-
+        st.info("✅ Respostas aos Quesitos finalizada. Avance para a Etapa 8.")
+        # Passa o caminho da raiz do projeto para o m08
+        render_etapa_8(st.session_state, save_current_state_and_log, PROJECT_ROOT) 
+    
     else:
-        st.success("🎉 Laudo Concluído e Gerado! Você pode gerar novamente na Etapa 8 ou voltar para a tela inicial.")
-        render_etapa_8(st.session_state, save_current_state, PROJECT_ROOT) # Permite gerar de novo
+        # Se todas as etapas foram concluídas, re-renderiza o módulo de encerramento
+        st.success("🎉 Todas as etapas concluídas! Você pode baixar o laudo na Etapa 8.")
+        render_etapa_8(st.session_state, save_current_state_and_log, PROJECT_ROOT)
+        
+    st.markdown("---")
+
+    # 3. Área de Geração Final (para salvar a qualquer momento)
+    if st.button("💾 Salvar Estado Atual do Processo", key="force_save"):
+        if save_current_state():
+            st.success("Estado do processo salvo manualmente com sucesso!")
+        else:
+            st.error("Falha ao salvar o estado do processo.")
